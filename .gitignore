@@ -26,9 +26,9 @@ temp_oda/
 *.dwl
 *.dwl2
 
-# Local build release files (ignored since GitHub blocks files over 100MB)
-ePlan_Documentation_Merger_portable.exe
-ePlan_Documentation_Merger_portable.zip
+# Local build release files
+# ePlan_Documentation_Merger_portable.exe
+# ePlan_Documentation_Merger_portable.zip
 
 # ODA File Converter binaries (large proprietary external tool) - tracked inside Source/bin/
 # bin/
