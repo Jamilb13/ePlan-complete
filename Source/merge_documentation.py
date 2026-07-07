@@ -293,8 +293,42 @@ def process_file_conversion(filename, pdf_dir, source_dir):
         
     return converted_pdf
 
+def copy_outlines_recursive(outline_list, reader, writer, page_mapping, merged_pages, added_merged, parent=None):
+    """Recursively copies bookmarks/outlines from reader to writer, shifting page destinations."""
+    last_added_item = None
+    for item in outline_list:
+        if isinstance(item, list):
+            if last_added_item is not None:
+                copy_outlines_recursive(item, reader, writer, page_mapping, merged_pages, added_merged, parent=last_added_item)
+        else:
+            try:
+                old_page = reader.get_destination_page_number(item)
+                if old_page is not None and old_page in page_mapping:
+                    new_page = page_mapping[old_page]
+                    last_added_item = writer.add_outline_item(
+                        title=item.title,
+                        page_number=new_page,
+                        parent=parent
+                    )
+                    
+                    # If this page was the insertion point for a merged file, add it as a child
+                    if old_page in merged_pages:
+                        filename = merged_pages[old_page]
+                        if filename not in added_merged:
+                            writer.add_outline_item(
+                                title=filename,
+                                page_number=new_page,
+                                parent=last_added_item
+                            )
+                            added_merged.add(filename)
+                else:
+                    last_added_item = None
+            except Exception as e:
+                logger.warning(f"Failed to copy outline item '{getattr(item, 'title', 'N/A')}': {e}")
+                last_added_item = None
+
 def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
-    """Scans a single PDF file, converts external links, and merges them into a completed PDF."""
+    """Scans a single PDF file, converts external links, and merges them into a completed PDF with updated outlines."""
     pdf_path = os.path.abspath(pdf_path)
     pdf_dir = os.path.dirname(pdf_path)
     filename_only = os.path.basename(pdf_path)
@@ -311,6 +345,11 @@ def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
     writer = pypdf.PdfWriter()
     
     has_merged_files = False
+    
+    page_mapping = {}      # Maps original_page_idx -> new_page_idx
+    merged_pages = {}      # Maps original_page_idx -> launch_filename
+    added_merged = set()   # Tracks which merged files were added as bookmark children
+    out_page_idx = 0       # Tracks current output page counter
     
     # Iterate through pages
     for page_idx, page in enumerate(reader.pages):
@@ -358,25 +397,55 @@ def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
             if converted_pdf_path and os.path.exists(converted_pdf_path):
                 logger.info(f"Merging converted PDF into output...")
                 
-                # If we are inserting after, keep the original page
+                merged_pages[page_idx] = launch_filename
+                
+                # If we are keeping the placeholder page
                 if not REPLACE_PLACEHOLDER:
                     writer.add_page(page)
+                    page_mapping[page_idx] = out_page_idx
+                    out_page_idx += 1
+                else:
+                    # Original page maps to the start of the inserted doc
+                    page_mapping[page_idx] = out_page_idx
                     
                 # Append pages of converted document
                 ext_reader = pypdf.PdfReader(converted_pdf_path)
                 for ext_page in ext_reader.pages:
                     writer.add_page(ext_page)
+                    out_page_idx += 1
                     
                 has_merged_files = True
                 logger.info(f"Merged {len(ext_reader.pages)} pages from '{launch_filename}' successfully.")
             else:
                 logger.warning(f"Could not merge '{launch_filename}' (file missing or conversion failed). Keeping original placeholder page.")
                 writer.add_page(page)
+                page_mapping[page_idx] = out_page_idx
+                out_page_idx += 1
         else:
             # Standard page, copy directly
             writer.add_page(page)
+            page_mapping[page_idx] = out_page_idx
+            out_page_idx += 1
 
     if has_merged_files:
+        # Rebuild outline/bookmark structure
+        if reader.outline:
+            try:
+                logger.info("Copying and adjusting original outlines...")
+                copy_outlines_recursive(reader.outline, reader, writer, page_mapping, merged_pages, added_merged)
+            except Exception as e:
+                logger.error(f"Failed to copy original outlines: {e}")
+        
+        # Add any merged files that were not nested under existing bookmarks
+        for page_idx, filename in merged_pages.items():
+            if filename not in added_merged:
+                new_page = page_mapping[page_idx]
+                logger.info(f"Adding top-level bookmark for: {filename}")
+                writer.add_outline_item(
+                    title=filename,
+                    page_number=new_page
+                )
+
         out_folder = target_dir if target_dir else pdf_dir
         output_path = os.path.join(out_folder, filename_only.replace(".pdf", "_complete.pdf"))
         logger.info(f"Saving merged document to: {output_path}")
