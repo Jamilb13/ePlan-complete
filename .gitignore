@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# PyInstaller / Build
+build/
+dist/
+*.spec
+
+# Application Logs & Temp Output
+*.log
+test_output.txt
+temp_oda/
+
+# Local Compiled / Converted PDF files (keep original source PDFs)
+*_converted.pdf
+*_complete.pdf
+*_test_render.pdf
+
+# CAD temporary files
+*.dwl
+*.dwl2
+
+# Local build release files
+ePlan_Documentation_Merger_portable.exe
+ePlan_Documentation_Merger_portable.zip
+
+# ODA File Converter binaries (large proprietary external tool, should be downloaded separately)
+bin/
+
+# Junk / Scratch drawings and tests
+Šrotiště/
