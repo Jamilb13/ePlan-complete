@@ -9,7 +9,7 @@ env/
 
 # PyInstaller / Build
 build/
-dist/
+# dist/
 *.spec
 
 # Application Logs & Temp Output
