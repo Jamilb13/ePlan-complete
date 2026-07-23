@@ -927,19 +927,25 @@ def analyze_pdf_structure_for_split(src_path):
         if full_doc_num != base_doc_num:
             break
 
-    # Assign output filenames according to user specification format: D231542633.TZ.pdf
+    # Assign output filenames according to user specification format: 0x_D231542633.TZ.pdf
+    # where x is the bookmark index (00 for COVER, 01+ for sections)
+    bookmark_idx = 0
     for sec in sections:
         code = sec['code']
+        prefix = f"{bookmark_idx:02d}_"
+        sec['bookmark_idx'] = bookmark_idx
+
         if code == 'COVER':
-            sec['filename'] = f"{base_doc_num}_00_Seznam_příloh.pdf"
+            sec['filename'] = f"{prefix}{base_doc_num}_Seznam_příloh.pdf"
         else:
             doc_num_found = None
             candidate_pages = list(range(sec['start_page'], min(sec['start_page'] + 5, sec['end_page'] + 1)))
 
-            # Pass 1: Exact document code pattern match (e.g., 04_D231542633.TZ1)
+            # Pass 1: Exact document code pattern match (e.g., D231542633.TZ1)
             for pno in candidate_pages:
                 ptxt = doc[pno-1].get_text('text')
-                m_exact = re.search(r'\b((?:[0-9]{2}_)?D\d{5,10}\.' + re.escape(code) + r')\b', ptxt, re.IGNORECASE)
+                # Match the core doc number without any existing prefix
+                m_exact = re.search(r'\b(D\d{5,10}\.' + re.escape(code) + r')\b', ptxt, re.IGNORECASE)
                 if m_exact:
                     doc_num_found = m_exact.group(1)
                     break
@@ -963,9 +969,11 @@ def analyze_pdf_structure_for_split(src_path):
                         break
                         
             if doc_num_found:
-                sec['filename'] = f"{doc_num_found}.pdf"
+                sec['filename'] = f"{prefix}{doc_num_found}.pdf"
             else:
-                sec['filename'] = f"{full_doc_num}.{code}.pdf"
+                sec['filename'] = f"{prefix}{full_doc_num}.{code}.pdf"
+
+        bookmark_idx += 1
 
     doc.close()
     return sections
