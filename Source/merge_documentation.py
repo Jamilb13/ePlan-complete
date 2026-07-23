@@ -801,30 +801,201 @@ class TextHandler(logging.Handler):
             self.text_widget.configure(state='disabled')
         self.text_widget.after(0, append)
 
-# GUI class
+# Helper functions for PDF Splitting
+def analyze_pdf_structure_for_split(src_path):
+    import fitz
+    import re
+    doc = fitz.open(src_path)
+    toc = doc.get_toc()
+    total_pages = len(doc)
+
+    page1_text = doc[0].get_text('text') if total_pages > 0 else ""
+    m_base = re.search(r'\b(D\d{4,8})\b', page1_text)
+    base_doc_num = m_base.group(1) if m_base else ""
+    if not base_doc_num:
+        m_file = re.search(r'\b(D\d{4,8})\b', os.path.basename(src_path))
+        if m_file:
+            base_doc_num = m_file.group(1)
+    if not base_doc_num:
+        base_doc_num = os.path.splitext(os.path.basename(src_path))[0]
+
+    sections = []
+
+    # Strategy 1: Bookmark scan for & tags (&TZ, &SM, &VV, &BS, &TZ1, etc.)
+    toc_sections = []
+    for item in toc:
+        lvl, title, page = item[0], item[1], item[2]
+        m = re.search(r'&([A-Za-z0-9_]+)\s*(.*)', title)
+        if m:
+            code = m.group(1).split('#')[0]
+            name = m.group(2).strip()
+            if not any(s['code'] == code for s in toc_sections):
+                toc_sections.append({'code': code, 'name': name or f"Část {code}", 'start_page': page, 'source': 'Záložky'})
+
+    if len(toc_sections) >= 2:
+        sorted_toc = sorted(toc_sections, key=lambda x: x['start_page'])
+        if sorted_toc[0]['start_page'] > 1:
+            sections.append({
+                'code': 'COVER',
+                'name': 'Seznam příloh / Úvodní část',
+                'start_page': 1,
+                'end_page': sorted_toc[0]['start_page'] - 1,
+                'source': 'Záložky'
+            })
+        for i, sec in enumerate(sorted_toc):
+            start_p = sec['start_page']
+            end_p = sorted_toc[i+1]['start_page'] - 1 if i + 1 < len(sorted_toc) else total_pages
+            sections.append({
+                'code': sec['code'],
+                'name': sec['name'],
+                'start_page': start_p,
+                'end_page': end_p,
+                'source': sec['source']
+            })
+
+    # Strategy 2: Text Scan Fallback (for merged files or lost TOC)
+    if not sections:
+        found_covers = []
+        for pno in range(1, total_pages + 1):
+            text = doc[pno-1].get_text('text')
+            lines = [l.strip() for l in text.split('\n') if l.strip()]
+
+            code_found = None
+            name_found = None
+
+            for idx, line in enumerate(lines[:15]):
+                m1 = re.match(r'^\.([A-Za-z0-9_]{2,8})$', line)
+                if m1:
+                    code_found = m1.group(1).upper()
+                    name_found = lines[1] if idx != 1 and len(lines) > 1 else (lines[0] if lines else "")
+                    break
+                m2 = re.match(r'^&([A-Za-z0-9_]{2,8})\b', line)
+                if m2:
+                    code_found = m2.group(1).upper()
+                    name_found = line
+                    break
+
+            if code_found:
+                found_covers.append({
+                    'code': code_found,
+                    'name': name_found or f"Část .{code_found}",
+                    'start_page': pno
+                })
+
+        if found_covers:
+            unique_covers = []
+            for fc in found_covers:
+                if not unique_covers or unique_covers[-1]['code'] != fc['code']:
+                    unique_covers.append(fc)
+            sorted_covers = sorted(unique_covers, key=lambda x: x['start_page'])
+            if sorted_covers[0]['start_page'] > 1:
+                sections.append({
+                    'code': 'COVER',
+                    'name': 'Seznam příloh / Úvodní část',
+                    'start_page': 1,
+                    'end_page': sorted_covers[0]['start_page'] - 1,
+                    'source': 'Textový sken'
+                })
+            for i, sec in enumerate(sorted_covers):
+                start_p = sec['start_page']
+                end_p = sorted_covers[i+1]['start_page'] - 1 if i + 1 < len(sorted_covers) else total_pages
+                sections.append({
+                    'code': sec['code'],
+                    'name': sec['name'],
+                    'start_page': start_p,
+                    'end_page': end_p,
+                    'source': 'Textový sken'
+                })
+
+    doc.close()
+
+    # Assign output filenames according to user specification format: D231542633.TZ.pdf
+    for sec in sections:
+        code = sec['code']
+        if code == 'COVER':
+            sec['filename'] = f"{base_doc_num}_00_Seznam_příloh.pdf"
+        else:
+            doc_temp = fitz.open(src_path)
+            doc_num_found = None
+            candidate_pages = list(range(sec['start_page'], min(sec['start_page'] + 3, sec['end_page'] + 1)))
+
+            # Pass 1: Exact document code pattern match (e.g., 04_D231542633.TZ1)
+            for pno in candidate_pages:
+                ptxt = doc_temp[pno-1].get_text('text')
+                m_exact = re.search(r'\b((?:[0-9]{2}_)?D\d{5,10}\.' + re.escape(code) + r')\b', ptxt, re.IGNORECASE)
+                if m_exact:
+                    doc_num_found = m_exact.group(1)
+                    break
+
+            # Pass 2: Header label match ("Dokument č.: ...")
+            if not doc_num_found:
+                for pno in candidate_pages:
+                    ptxt = doc_temp[pno-1].get_text('text')
+                    m_doc_hdr = re.search(r'Dokument\s*č\.\s*:\s*([A-Za-z0-9_\.]+\.' + re.escape(code) + r')\b', ptxt, re.IGNORECASE)
+                    if m_doc_hdr:
+                        doc_num_found = m_doc_hdr.group(1)
+                        break
+
+            # Pass 3: Title block number fallback
+            if not doc_num_found:
+                for pno in candidate_pages:
+                    ptxt = doc_temp[pno-1].get_text('text')
+                    m_sub = re.search(r'(\d{4})\s*\n\s*1\s*\n\s*\.' + re.escape(code), ptxt, re.IGNORECASE)
+                    if m_sub and base_doc_num:
+                        doc_num_found = f"{base_doc_num}{m_sub.group(1)}.{code}"
+                        break
+                        
+            doc_temp.close()
+
+            if doc_num_found:
+                sec['filename'] = f"{doc_num_found}.pdf"
+            else:
+                sec['filename'] = f"{base_doc_num}.{code}.pdf"
+
+    return sections
+
+# GUI class with tabs for merging and splitting
 class MergerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("ePlan Documentation Merger")
-        self.root.geometry("780x600")
-        self.root.minsize(640, 480)
+        self.root.title("ePlan Documentation Merger & Splitter")
+        self.root.geometry("840x700")
+        self.root.minsize(700, 550)
         
         self.style = ttk.Style()
-        self.style.theme_use('vista')
-        
-        main_frame = ttk.Frame(root, padding="15")
+        try:
+            self.style.theme_use('vista')
+        except Exception:
+            pass
+
+        main_frame = ttk.Frame(root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        header_label = ttk.Label(main_frame, text="ePlan Documentation Merger", font=("Segoe UI", 16, "bold"))
-        header_label.pack(anchor=tk.W, pady=(0, 15))
-        
-        fields_frame = ttk.LabelFrame(main_frame, text=" Configuration ", padding="15")
+
+        header_label = ttk.Label(main_frame, text="ePlan Documentation Tool", font=("Segoe UI", 16, "bold"))
+        header_label.pack(anchor=tk.W, pady=(0, 10))
+
+        # Notebook tabs
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        self.tab_merge = ttk.Frame(self.notebook, padding="10")
+        self.tab_split = ttk.Frame(self.notebook, padding="10")
+
+        self.notebook.add(self.tab_merge, text=" 🔗 Slučování PDF ")
+        self.notebook.add(self.tab_split, text=" ✂️ Rozdělování PDF ")
+
+        self.setup_merge_tab()
+        self.setup_split_tab()
+
+        self.setup_logging()
+
+    def setup_merge_tab(self):
+        fields_frame = ttk.LabelFrame(self.tab_merge, text=" Configuration (Konfigurace) ", padding="15")
         fields_frame.pack(fill=tk.X, pady=(0, 15))
         
         ttk.Label(fields_frame, text="Source Directory (Zdrojový adresář):").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.source_entry = ttk.Entry(fields_frame, width=50)
         self.source_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
-        
         self.source_entry.insert(0, get_base_path())
         
         source_btn = ttk.Button(fields_frame, text="Browse Folder...", command=self.browse_source)
@@ -844,13 +1015,13 @@ class MergerApp:
         
         fields_frame.columnconfigure(1, weight=1)
         
-        log_frame = ttk.LabelFrame(main_frame, text=" Progress Log & Structure (Průběh a Náhled) ", padding="10")
+        log_frame = ttk.LabelFrame(self.tab_merge, text=" Progress Log & Structure (Průběh a Náhled) ", padding="10")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
         
         self.log_text = ScrolledText(log_frame, state='disabled', height=14, font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
         
-        action_frame = ttk.Frame(main_frame)
+        action_frame = ttk.Frame(self.tab_merge)
         action_frame.pack(fill=tk.X)
         
         self.status_label = ttk.Label(action_frame, text="Ready", font=("Segoe UI", 10, "italic"))
@@ -861,11 +1032,95 @@ class MergerApp:
         
         self.run_button = ttk.Button(action_frame, text="Run Merger (Spustit)", command=self.start_process)
         self.run_button.pack(side=tk.RIGHT, pady=5, ipadx=10)
+
+    def setup_split_tab(self):
+        split_cfg = ttk.LabelFrame(self.tab_split, text=" Konfigurace rozdělování ", padding="10")
+        split_cfg.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(split_cfg, text="Zdrojový PDF soubor:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.split_src_entry = ttk.Entry(split_cfg, width=45)
+        self.split_src_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
         
-        self.setup_logging()
+        btn_src_browse = ttk.Button(split_cfg, text="Procházet...", command=self.browse_split_src)
+        btn_src_browse.grid(row=0, column=2, padx=5, pady=5)
+
+        self.btn_analyze = ttk.Button(split_cfg, text="🔍 Analýza struktury", command=self.start_split_analysis)
+        self.btn_analyze.grid(row=0, column=3, padx=5, pady=5)
+
+        ttk.Label(split_cfg, text="Cílová složka:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.split_dst_entry = ttk.Entry(split_cfg, width=45)
+        self.split_dst_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
+        self.split_dst_entry.insert(0, get_base_path())
+
+        btn_dst_browse = ttk.Button(split_cfg, text="Procházet...", command=self.browse_split_dst)
+        btn_dst_browse.grid(row=1, column=2, padx=5, pady=5)
+
+        split_cfg.columnconfigure(1, weight=1)
+
+        # Options bar
+        opt_frame = ttk.Frame(self.tab_split)
+        opt_frame.pack(fill=tk.X, pady=(0, 5))
+
+        btn_check_all = ttk.Button(opt_frame, text="Označit vše", command=self.split_check_all)
+        btn_check_all.pack(side=tk.LEFT, padx=(0, 5))
+
+        btn_uncheck_all = ttk.Button(opt_frame, text="Odznačit vše", command=self.split_uncheck_all)
+        btn_uncheck_all.pack(side=tk.LEFT, padx=(0, 15))
+
+        self.split_export_cover_var = tk.BooleanVar(value=True)
+        cb_cover = ttk.Checkbutton(opt_frame, text="Exportovat Seznam příloh / Úvodní část", variable=self.split_export_cover_var)
+        cb_cover.pack(side=tk.LEFT)
+
+        # Sections Table
+        table_frame = ttk.LabelFrame(self.tab_split, text=" Nalezené části dokumentace ", padding="5")
+        table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        columns = ("export", "name", "code", "pages", "filename")
+        self.split_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=8)
         
+        self.split_tree.heading("export", text="Export")
+        self.split_tree.heading("name", text="Část dokumentace")
+        self.split_tree.heading("code", text="Kód")
+        self.split_tree.heading("pages", text="Strany")
+        self.split_tree.heading("filename", text="Výstupní název souboru (Dvojklik pro úpravu)")
+
+        self.split_tree.column("export", width=60, anchor="center")
+        self.split_tree.column("name", width=220, anchor="w")
+        self.split_tree.column("code", width=60, anchor="center")
+        self.split_tree.column("pages", width=90, anchor="center")
+        self.split_tree.column("filename", width=280, anchor="w")
+
+        tree_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.split_tree.yview)
+        self.split_tree.configure(yscrollcommand=tree_scroll.set)
+
+        self.split_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.split_tree.bind("<Button-1>", self.on_split_tree_click)
+        self.split_tree.bind("<Double-1>", self.on_split_tree_double_click)
+
+        # Log & Action frame
+        split_log_frame = ttk.LabelFrame(self.tab_split, text=" Průběh rozdělování ", padding="5")
+        split_log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+
+        self.split_log_text = ScrolledText(split_log_frame, state='disabled', height=6, font=("Consolas", 9))
+        self.split_log_text.pack(fill=tk.BOTH, expand=True)
+
+        split_action_frame = ttk.Frame(self.tab_split)
+        split_action_frame.pack(fill=tk.X)
+
+        self.split_status_lbl = ttk.Label(split_action_frame, text="Připraven k rozdělení", font=("Segoe UI", 10, "italic"))
+        self.split_status_lbl.pack(side=tk.LEFT, pady=5)
+
+        self.btn_open_dst = ttk.Button(split_action_frame, text="📂 Otevřít cílovou složku", command=self.open_split_dst)
+        self.btn_open_dst.pack(side=tk.RIGHT, padx=(5, 0))
+
+        self.btn_run_split = ttk.Button(split_action_frame, text="▶ Rozdělit PDF dokument", command=self.start_split_execution)
+        self.btn_run_split.pack(side=tk.RIGHT, padx=5)
+
+        self.split_detected_sections = []
+
     def setup_logging(self):
-        # Prevent adding duplicate handlers
         if not logger.handlers:
             handler = TextHandler(self.log_text)
             handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%H:%M:%S"))
@@ -874,7 +1129,20 @@ class MergerApp:
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s"))
             logger.addHandler(console_handler)
-        
+
+    def _split_log(self, msg):
+        def append():
+            self.split_log_text.configure(state='normal')
+            self.split_log_text.insert('end', msg + '\n')
+            self.split_log_text.see('end')
+            self.split_log_text.configure(state='disabled')
+        self.split_log_text.after(0, append)
+
+    def _split_log_clear(self):
+        self.split_log_text.configure(state='normal')
+        self.split_log_text.delete('1.0', tk.END)
+        self.split_log_text.configure(state='disabled')
+
     def browse_source(self):
         dir_path = filedialog.askdirectory(initialdir=self.source_entry.get())
         if dir_path:
@@ -908,7 +1176,187 @@ class MergerApp:
         if dir_path:
             self.target_entry.delete(0, tk.END)
             self.target_entry.insert(0, os.path.normpath(dir_path))
-            
+
+    def browse_split_src(self):
+        initial_dir = os.path.dirname(self.split_src_entry.get()) if self.split_src_entry.get() else get_base_path()
+        file_path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            title="Vyberte zdrojový PDF soubor k rozdělení",
+            filetypes=[("PDF soubory (*.pdf)", "*.pdf"), ("Všechny soubory", "*.*")]
+        )
+        if file_path:
+            norm_path = os.path.normpath(file_path)
+            self.split_src_entry.delete(0, tk.END)
+            self.split_src_entry.insert(0, norm_path)
+            self.start_split_analysis()
+
+    def browse_split_dst(self):
+        initial_dir = self.split_dst_entry.get() if self.split_dst_entry.get() else get_base_path()
+        dir_path = filedialog.askdirectory(initialdir=initial_dir, title="Vyberte složku pro uložení rozdělených PDF")
+        if dir_path:
+            self.split_dst_entry.delete(0, tk.END)
+            self.split_dst_entry.insert(0, os.path.normpath(dir_path))
+
+    def split_check_all(self):
+        for item in self.split_detected_sections:
+            item['export'] = True
+        self.render_split_tree()
+
+    def split_uncheck_all(self):
+        for item in self.split_detected_sections:
+            item['export'] = False
+        self.render_split_tree()
+
+    def on_split_tree_click(self, event):
+        region = self.split_tree.identify("region", event.x, event.y)
+        if region == "cell":
+            column = self.split_tree.identify_column(event.x)
+            if column == "#1":
+                item_id = self.split_tree.identify_row(event.y)
+                if item_id:
+                    idx = int(item_id)
+                    if 0 <= idx < len(self.split_detected_sections):
+                        self.split_detected_sections[idx]['export'] = not self.split_detected_sections[idx]['export']
+                        self.render_split_tree()
+
+    def on_split_tree_double_click(self, event):
+        region = self.split_tree.identify("region", event.x, event.y)
+        if region == "cell":
+            column = self.split_tree.identify_column(event.x)
+            if column == "#5":
+                item_id = self.split_tree.identify_row(event.y)
+                if item_id:
+                    idx = int(item_id)
+                    sec = self.split_detected_sections[idx]
+                    old_name = sec['filename']
+                    
+                    from tkinter.simpledialog import askstring
+                    new_name = askstring("Úprava názvu souboru", f"Zadejte nový výstupní název pro sekci {sec['code']}:", initialvalue=old_name)
+                    if new_name and new_name.strip():
+                        if not new_name.lower().endswith('.pdf'):
+                            new_name += '.pdf'
+                        sec['filename'] = new_name.strip()
+                        self.render_split_tree()
+
+    def start_split_analysis(self):
+        src_path = self.split_src_entry.get().strip()
+        if not src_path or not os.path.exists(src_path):
+            messagebox.showerror("Chyba souboru", "Vyberte platný zdrojový PDF soubor k rozdělení.")
+            return
+
+        self._split_log_clear()
+        self._split_log(f"Zahajuji analýzu struktury PDF: {os.path.basename(src_path)}")
+        self.split_status_lbl.config(text="Skenuji strukturu PDF...")
+
+        def _worker():
+            try:
+                sections = analyze_pdf_structure_for_split(src_path)
+                for sec in sections:
+                    sec['export'] = True
+                self.split_detected_sections = sections
+                self.root.after(0, self._render_analysis_results)
+            except Exception as e:
+                self.root.after(0, lambda: self._handle_analysis_error(str(e)))
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+    def _render_analysis_results(self):
+        self.render_split_tree()
+        count = len(self.split_detected_sections)
+        self._split_log(f"Detekováno {count} částí dokumentace.")
+        self.split_status_lbl.config(text=f"Analýza dokončena: Nalezeno {count} částí dokumentace.")
+
+    def _handle_analysis_error(self, err_msg):
+        self._split_log(f"❌ Chyba při analýze PDF: {err_msg}")
+        self.split_status_lbl.config(text="Chyba při analýze PDF.")
+        messagebox.showerror("Chyba analýzy", f"Nepodařilo se prozkoumat strukturu PDF:\n{err_msg}")
+
+    def render_split_tree(self):
+        for item in self.split_tree.get_children():
+            self.split_tree.delete(item)
+
+        for idx, sec in enumerate(self.split_detected_sections):
+            check_str = "☑ Ano" if sec.get('export', True) else "☐ Ne"
+            pages_str = f"{sec['start_page']}–{sec['end_page']}"
+            self.split_tree.insert(
+                "", "end", iid=str(idx),
+                values=(check_str, sec['name'], sec['code'], pages_str, sec['filename'])
+            )
+
+    def start_split_execution(self):
+        src_path = self.split_src_entry.get().strip()
+        dst_dir = self.split_dst_entry.get().strip()
+
+        if not src_path or not os.path.exists(src_path):
+            messagebox.showerror("Chyba souboru", "Vyberte platný zdrojový PDF soubor.")
+            return
+
+        if not dst_dir:
+            messagebox.showerror("Chyba složky", "Zadejte platnou cílovou složku pro uložení.")
+            return
+
+        selected_secs = [s for s in self.split_detected_sections if s.get('export', True)]
+
+        if not self.split_export_cover_var.get():
+            selected_secs = [s for s in selected_secs if s['code'] != 'COVER']
+
+        if not selected_secs:
+            messagebox.showwarning("Žádné sekce", "Nebyly vybrány žádné části dokumentace ke stažení/exportu.")
+            return
+
+        self.btn_run_split.config(state='disabled')
+        self.btn_analyze.config(state='disabled')
+        self.split_status_lbl.config(text="Rozdělování spuštěno...")
+        self._split_log(f"Spouštím rozdělení PDF. Cílová složka: {dst_dir}")
+
+        def _worker():
+            try:
+                import fitz
+                os.makedirs(dst_dir, exist_ok=True)
+                doc_src = fitz.open(src_path)
+                total = len(selected_secs)
+
+                for idx, sec in enumerate(selected_secs):
+                    self._split_log(f"Exportuji ({idx+1}/{total}): {sec['filename']} (strany {sec['start_page']}–{sec['end_page']})...")
+                    self.root.after(0, lambda i=idx, t=total: self.split_status_lbl.config(text=f"Exportuji ({i+1}/{t})..."))
+
+                    doc_sub = fitz.open()
+                    doc_sub.insert_pdf(doc_src, from_page=sec['start_page']-1, to_page=sec['end_page']-1)
+                    out_path = os.path.join(dst_dir, sec['filename'])
+                    doc_sub.save(out_path)
+                    doc_sub.close()
+                    self._split_log(f"  ✓ Uloženo: {out_path}")
+
+                doc_src.close()
+                self._split_log("🎉 Rozdělení dokumentace bylo úspěšně dokončeno.")
+                self.root.after(0, lambda: self._finish_split_execution(True, "Rozdělení bylo dokončeno!"))
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self._finish_split_execution(False, f"Chyba: {err}"))
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+    def _finish_split_execution(self, success, msg):
+        self.btn_run_split.config(state='normal')
+        self.btn_analyze.config(state='normal')
+        if success:
+            self.split_status_lbl.config(text="Rozdělení PDF dokončeno.")
+            messagebox.showinfo("Úspěch", f"Rozdělení PDF dokumentu bylo úspěšně dokončeno!\n\nVygenerované soubory naleznete ve složce:\n{self.split_dst_entry.get().strip()}")
+        else:
+            self.split_status_lbl.config(text="Chyba při rozdělování.")
+            messagebox.showerror("Chyba", msg)
+
+    def open_split_dst(self):
+        dst_dir = self.split_dst_entry.get().strip()
+        if dst_dir and os.path.exists(dst_dir):
+            try:
+                os.startfile(dst_dir)
+            except Exception as e:
+                messagebox.showerror("Chyba", f"Nelze otevřít složku:\n{e}")
+        else:
+            messagebox.showerror("Chyba", f"Složka neexistuje:\n{dst_dir}")
+
     def update_status(self, text):
         self.status_label.config(text=text)
         
