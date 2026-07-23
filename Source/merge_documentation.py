@@ -907,7 +907,25 @@ def analyze_pdf_structure_for_split(src_path):
                     'source': 'Textový sken'
                 })
 
-    doc.close()
+    # Discover full document number across sections (e.g. D09293501 or D231542633)
+    full_doc_num = base_doc_num
+    for sec in sections:
+        code = sec['code']
+        if code == 'COVER':
+            continue
+        candidate_pages = list(range(sec['start_page'], min(sec['start_page'] + 5, sec['end_page'] + 1)))
+        for pno in candidate_pages:
+            ptxt = doc[pno-1].get_text('text')
+            m_full = re.search(r'\b(' + re.escape(base_doc_num) + r'\d{3,5})\b', ptxt)
+            if m_full:
+                full_doc_num = m_full.group(1)
+                break
+            m_sub = re.search(r'(\d{4})\s*\n\s*1\s*\n\s*\.' + re.escape(code), ptxt, re.IGNORECASE)
+            if m_sub:
+                full_doc_num = f"{base_doc_num}{m_sub.group(1)}"
+                break
+        if full_doc_num != base_doc_num:
+            break
 
     # Assign output filenames according to user specification format: D231542633.TZ.pdf
     for sec in sections:
@@ -915,13 +933,12 @@ def analyze_pdf_structure_for_split(src_path):
         if code == 'COVER':
             sec['filename'] = f"{base_doc_num}_00_Seznam_příloh.pdf"
         else:
-            doc_temp = fitz.open(src_path)
             doc_num_found = None
-            candidate_pages = list(range(sec['start_page'], min(sec['start_page'] + 3, sec['end_page'] + 1)))
+            candidate_pages = list(range(sec['start_page'], min(sec['start_page'] + 5, sec['end_page'] + 1)))
 
             # Pass 1: Exact document code pattern match (e.g., 04_D231542633.TZ1)
             for pno in candidate_pages:
-                ptxt = doc_temp[pno-1].get_text('text')
+                ptxt = doc[pno-1].get_text('text')
                 m_exact = re.search(r'\b((?:[0-9]{2}_)?D\d{5,10}\.' + re.escape(code) + r')\b', ptxt, re.IGNORECASE)
                 if m_exact:
                     doc_num_found = m_exact.group(1)
@@ -930,7 +947,7 @@ def analyze_pdf_structure_for_split(src_path):
             # Pass 2: Header label match ("Dokument č.: ...")
             if not doc_num_found:
                 for pno in candidate_pages:
-                    ptxt = doc_temp[pno-1].get_text('text')
+                    ptxt = doc[pno-1].get_text('text')
                     m_doc_hdr = re.search(r'Dokument\s*č\.\s*:\s*([A-Za-z0-9_\.]+\.' + re.escape(code) + r')\b', ptxt, re.IGNORECASE)
                     if m_doc_hdr:
                         doc_num_found = m_doc_hdr.group(1)
@@ -939,19 +956,18 @@ def analyze_pdf_structure_for_split(src_path):
             # Pass 3: Title block number fallback
             if not doc_num_found:
                 for pno in candidate_pages:
-                    ptxt = doc_temp[pno-1].get_text('text')
+                    ptxt = doc[pno-1].get_text('text')
                     m_sub = re.search(r'(\d{4})\s*\n\s*1\s*\n\s*\.' + re.escape(code), ptxt, re.IGNORECASE)
-                    if m_sub and base_doc_num:
+                    if m_sub:
                         doc_num_found = f"{base_doc_num}{m_sub.group(1)}.{code}"
                         break
                         
-            doc_temp.close()
-
             if doc_num_found:
                 sec['filename'] = f"{doc_num_found}.pdf"
             else:
-                sec['filename'] = f"{base_doc_num}.{code}.pdf"
+                sec['filename'] = f"{full_doc_num}.{code}.pdf"
 
+    doc.close()
     return sections
 
 # GUI class with tabs for merging and splitting
@@ -959,8 +975,8 @@ class MergerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ePlan Documentation Merger & Splitter")
-        self.root.geometry("840x700")
-        self.root.minsize(700, 550)
+        self.root.geometry("860x720")
+        self.root.minsize(720, 560)
         
         self.style = ttk.Style()
         try:
@@ -1067,6 +1083,9 @@ class MergerApp:
         btn_uncheck_all = ttk.Button(opt_frame, text="Odznačit vše", command=self.split_uncheck_all)
         btn_uncheck_all.pack(side=tk.LEFT, padx=(0, 15))
 
+        btn_edit_selected = ttk.Button(opt_frame, text="✏️ Přejmenovat vybraný soubor", command=self.edit_selected_split_filename)
+        btn_edit_selected.pack(side=tk.LEFT, padx=(0, 15))
+
         self.split_export_cover_var = tk.BooleanVar(value=True)
         cb_cover = ttk.Checkbutton(opt_frame, text="Exportovat Seznam příloh / Úvodní část", variable=self.split_export_cover_var)
         cb_cover.pack(side=tk.LEFT)
@@ -1082,13 +1101,13 @@ class MergerApp:
         self.split_tree.heading("name", text="Část dokumentace")
         self.split_tree.heading("code", text="Kód")
         self.split_tree.heading("pages", text="Strany")
-        self.split_tree.heading("filename", text="Výstupní název souboru (Dvojklik pro úpravu)")
+        self.split_tree.heading("filename", text="Výstupní název souboru (Dvojklik / Tlačítko pro úpravu)")
 
         self.split_tree.column("export", width=60, anchor="center")
         self.split_tree.column("name", width=220, anchor="w")
         self.split_tree.column("code", width=60, anchor="center")
         self.split_tree.column("pages", width=90, anchor="center")
-        self.split_tree.column("filename", width=280, anchor="w")
+        self.split_tree.column("filename", width=300, anchor="w")
 
         tree_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.split_tree.yview)
         self.split_tree.configure(yscrollcommand=tree_scroll.set)
@@ -1207,6 +1226,27 @@ class MergerApp:
             item['export'] = False
         self.render_split_tree()
 
+    def edit_selected_split_filename(self):
+        selected_item = self.split_tree.selection()
+        if not selected_item:
+            messagebox.showinfo("Výběr sekce", "Vyberte v tabulce řádek sekce, kterou chcete přejmenovat.")
+            return
+        idx = int(selected_item[0])
+        if 0 <= idx < len(self.split_detected_sections):
+            sec = self.split_detected_sections[idx]
+            from tkinter.simpledialog import askstring
+            new_name = askstring(
+                "Přejmenování souboru",
+                f"Zadejte nový výstupní název pro část '{sec['name']}' ({sec['code']}):",
+                initialvalue=sec['filename']
+            )
+            if new_name and new_name.strip():
+                clean_name = new_name.strip()
+                if not clean_name.lower().endswith('.pdf'):
+                    clean_name += '.pdf'
+                sec['filename'] = clean_name
+                self.render_split_tree()
+
     def on_split_tree_click(self, event):
         region = self.split_tree.identify("region", event.x, event.y)
         if region == "cell":
@@ -1220,23 +1260,23 @@ class MergerApp:
                         self.render_split_tree()
 
     def on_split_tree_double_click(self, event):
-        region = self.split_tree.identify("region", event.x, event.y)
-        if region == "cell":
-            column = self.split_tree.identify_column(event.x)
-            if column == "#5":
-                item_id = self.split_tree.identify_row(event.y)
-                if item_id:
-                    idx = int(item_id)
-                    sec = self.split_detected_sections[idx]
-                    old_name = sec['filename']
-                    
-                    from tkinter.simpledialog import askstring
-                    new_name = askstring("Úprava názvu souboru", f"Zadejte nový výstupní název pro sekci {sec['code']}:", initialvalue=old_name)
-                    if new_name and new_name.strip():
-                        if not new_name.lower().endswith('.pdf'):
-                            new_name += '.pdf'
-                        sec['filename'] = new_name.strip()
-                        self.render_split_tree()
+        item_id = self.split_tree.identify_row(event.y)
+        if item_id:
+            idx = int(item_id)
+            if 0 <= idx < len(self.split_detected_sections):
+                sec = self.split_detected_sections[idx]
+                from tkinter.simpledialog import askstring
+                new_name = askstring(
+                    "Přejmenování souboru",
+                    f"Zadejte nový výstupní název pro část '{sec['name']}' ({sec['code']}):",
+                    initialvalue=sec['filename']
+                )
+                if new_name and new_name.strip():
+                    clean_name = new_name.strip()
+                    if not clean_name.lower().endswith('.pdf'):
+                        clean_name += '.pdf'
+                    sec['filename'] = clean_name
+                    self.render_split_tree()
 
     def start_split_analysis(self):
         src_path = self.split_src_entry.get().strip()
