@@ -23,19 +23,25 @@ Aplikace se skládá z konfigurační části, logovacího okna a spouštěcího
 
 1. **Source Directory (Zdrojový adresář)**:
    * Složka, ve které program vyhledá hlavní PDF soubory k procesování a zároveň v ní (i v jejích podsložkách) bude hledat odkazované externí přílohy.
-   * Výchozí hodnota je nastavena na složku, ze které jste program spustili. Změnit ji můžete kliknutím na tlačítko **Browse Folder...**.
+   * Výchozí hodnota je nastavena na složku, ze které jste program spustili. Změnit ji můžete kliknutím na tlačítko **Procházet...** nebo složku přímo otevřít v Průzkumníku tlačítkem **📂 Otevřít**.
 2. **Source File (Zdrojový soubor - volitelně)**:
-   * Umožňuje vybrat jeden konkrétní hlavního PDF soubor (např. `D23154_V7.1_20250306110226.pdf`) nebo seznamový soubor (`.txt`, `.csv`), který se má zpracovat.
+   * Umožňuje vybrat jeden konkrétní hlavní PDF soubor (např. `D23154_V7.1_20250306110226.pdf`) nebo seznamový soubor (`.txt`, `.csv`), který se má zpracovat.
    * Pokud toto pole necháte **prázdné**, program automaticky prohledá a zpracuje **všechny PDF soubory** v zadaném zdrojovém adresáři.
 3. **Target Directory (Cílový adresář - volitelně)**:
    * Složka, kam se uloží hotové sloučené PDF dokumenty.
+   * Tlačítkem **📂 Otevřít** můžete cílovou složku ihned zobrazit v Průzkumníku.
    * Pokud pole necháte **prázdné**, sloučené soubory se uloží do stejné složky jako zdrojové PDF a budou mít na konci názvu příponu **`_complete.pdf`** (např. ze souboru `D23154.pdf` vznikne `D23154_complete.pdf`).
-4. **Progress Log & Structure (Průběh a Náhled)**:
+4. **Progress Bar & Info (Ukazatel postupu a stav)**:
+   * V reálném čase zobrazuje grafický posun (v procentech) a aktuální stav zpracování (např. *33% - Zpracovávám soubor 1/3: D23154.pdf (strana 12/45)*).
+5. **Synchronizace adresářů mezi záložkami**:
+   * Zdrojový a cílový adresář se automaticky sdílí a synchronizují mezi záložkami **Slučování** a **Rozdělování**.
+   * Po dokončení slučování se vytvořený soubor `_complete.pdf` automaticky předvyplní do záložky Rozdělování.
+6. **Progress Log & Structure (Průběh a Náhled)**:
    * Zobrazuje podrobné informace o každém kroku (které soubory byly nalezeny, zda převod proběhl úspěšně, kolik stránek bylo sloučeno, případně jaké chyby nastaly) a také stromový náhled struktury dokumentace.
-5. **Náhled struktury (Preview)**:
+7. **Náhled struktury (Preview)**:
    * Vykreslí přehledný stromový náhled dokumentu s výpisem všech odkazovaných příloh, jejich nalezeným umístěním na disku a typem bez nutnosti spouštět plné slučování.
-6. **Run Merger (Spustit)**:
-   * Spustí samotný proces slučování. Proces běží na pozadí, takže okno programu během práce nezamrzne a můžete sledovat výpisy v logu v reálném čase.
+8. **Run Merger (Spustit)**:
+   * Spustí samotný proces slučování. Proces běží na pozadí, takže okno programu během práce nezamrzne a můžete sledovat výpisy v logu i posun na ukazateli postupu v reálném čase.
 
 ---
 

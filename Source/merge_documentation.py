@@ -7,9 +7,33 @@ import logging
 import tempfile
 import threading
 import urllib.parse
+import importlib
+import webbrowser
+
+def install_and_import(package_name, import_name=None):
+    if import_name is None:
+        import_name = package_name
+    try:
+        importlib.import_module(import_name)
+    except ImportError:
+        print(f"Instaluji chybějící knihovnu: {package_name}...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+            importlib.import_module(import_name)
+        except Exception as e:
+            print(f"Chyba při instalaci {package_name}: {e}")
+            sys.exit(1)
+
+install_and_import("customtkinter")
+install_and_import("pillow", "PIL")
+
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from tkinter.scrolledtext import ScrolledText
+from tkinter import filedialog, messagebox
+import customtkinter as ctk
+
+# Set GUI theme and style
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
 
 import pypdf
 import win32com.client
@@ -44,7 +68,7 @@ SOURCE_FILE_INDEX = {} # Maps normalized filename -> absolute_path
 def build_source_file_index(source_dir):
     """
     Crawls source_dir ONCE and builds a fast O(1) filename lookup index.
-    Eliminates repetitive os.walk disk scans during link resolution.
+    Eliminates repetitivše os.walk disk scans during link resolution.
     """
     global SOURCE_FILE_INDEX
     SOURCE_FILE_INDEX.clear()
@@ -454,7 +478,7 @@ def extract_launch_link(page, page_idx, pypdf_reader=None):
 
 def get_pdf_structure_preview(pdf_path, source_dir):
     """
-    Scans a PDF file for launch links and resolved target file locations.
+    Scans a PDF file for launch links and resolvšed target file locations.
     Returns a formatted string representing the document structure tree.
     """
     pdf_path = os.path.abspath(pdf_path)
@@ -497,7 +521,7 @@ def get_pdf_structure_preview(pdf_path, source_dir):
                     else:
                         status = f"Neznámý formát ({ext})"
                 else:
-                    status = "NENALEZENO (Soubor chybí ve zdrojové složce)"
+                    status = "NENALEZENO (Soubor chybí vše zdrojové složce)"
 
                 items.append({
                     "page": page_idx + 1,
@@ -517,7 +541,7 @@ def get_pdf_structure_preview(pdf_path, source_dir):
     lines.append("NÁHLED STRUKTURY DOKUMENTACE / DOCUMENTATION STRUCTURE PREVIEW")
     lines.append("=================================================================================")
     lines.append(f"📄 Hlavní PDF: {filename_only}")
-    lines.append(f"📍 Umístění: {pdf_path}")
+    lines.append(f"📋 Umístění: {pdf_path}")
     lines.append(f"📑 Celkem stran hlavní dokumentace: {total_pages}")
     lines.append(f"🔗 Nalezeno odkazů na přílohy: {len(items)}")
     lines.append("─" * 81)
@@ -532,23 +556,21 @@ def get_pdf_structure_preview(pdf_path, source_dir):
             
             lines.append(f"{prefix}📄 Strana {item['page']}: Odkaz -> '{item['link']}'")
             if item['target_path']:
-                lines.append(f"{child_prefix}├── 📍 Umístění: {item['target_path']}")
-                lines.append(f"{child_prefix}└── ℹ️ Typ/Stav: {item['status']}")
-            else:
-                lines.append(f"{child_prefix}├── 📍 Umístění: NENALEZENO")
-                lines.append(f"{child_prefix}└── ⚠️ Typ/Stav: {item['status']}")
+                lines.append(f"{child_prefix}├── 📋 Umístění: {item['target_path']}")
+            lines.append(f"{child_prefix}├── 📋 Umístění: NENALEZENO")
+            lines.append(f"{child_prefix}└── ⚠️ Typ/Stav: {item['status']}")
 
     lines.append("=================================================================================")
     return "\n".join(lines)
 
-def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
+def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None, progress_callback=None):
     """Scans a single PDF file, converts external links, and merges them into a completed PDF with updated outlines."""
     pdf_path = os.path.abspath(pdf_path)
     pdf_dir = os.path.dirname(pdf_path)
     filename_only = os.path.basename(pdf_path)
     
     if filename_only.endswith("_complete.pdf") or "_converted" in filename_only:
-        return
+        return None
 
     logger.info(f"==================================================")
     logger.info(f"Processing PDF: {filename_only}")
@@ -564,7 +586,7 @@ def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
         src_doc = fitz.open(pdf_path)
     except Exception as e:
         logger.error(f"Failed to open PDF '{pdf_path}': {e}. Skipping this file.")
-        return
+        return None
 
     pypdf_reader = None
     try:
@@ -579,8 +601,15 @@ def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
     merged_pages = {}
     added_merged = set()
     out_page_idx = 0
+    total_src_pages = len(src_doc)
     
-    for page_idx in range(len(src_doc)):
+    for page_idx in range(total_src_pages):
+        if progress_callback:
+            try:
+                progress_callback(page_idx + 1, total_src_pages)
+            except Exception:
+                pass
+
         try:
             page = src_doc[page_idx]
             launch_filename = extract_launch_link(page, page_idx, pypdf_reader)
@@ -635,6 +664,7 @@ def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
             except Exception:
                 pass
 
+    output_path = None
     if has_merged_files:
         try:
             orig_toc = src_doc.get_toc(simple=False)
@@ -674,6 +704,7 @@ def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
             logger.info(f"Completed processing for: {filename_only}")
         except Exception as e:
             logger.error(f"Failed to save output PDF '{output_path}': {e}")
+            output_path = None
     else:
         logger.info(f"No changes made to {filename_only} (no launch links found or successfully merged).")
 
@@ -682,6 +713,8 @@ def scan_and_merge_pdf(pdf_path, source_dir, target_dir=None):
         src_doc.close()
     except Exception:
         pass
+
+    return output_path
 
 def get_pdf_files_to_process(source_dir, source_file=None):
     """Finds list of PDF files to process from source_file or source_dir."""
@@ -724,16 +757,21 @@ def preview_process(source_dir, source_file=None, progress_callback=None):
     pythoncom.CoInitialize()
     try:
         logger.info("Generuji náhled struktury dokumentace...")
+        if progress_callback:
+            progress_callback("Indexuji soubory ve zdrojovém adresáři...", pct=0.02)
         build_source_file_index(source_dir)
         pdf_files = get_pdf_files_to_process(source_dir, source_file)
         
         if not pdf_files:
             logger.warning("Nenalezeny žádné PDF soubory pro zobrazení struktury.")
             if progress_callback:
-                progress_callback("Náhled dokončen (Žádná PDF nenalezena)")
+                progress_callback("Náhled dokončen (Žádná PDF nenalezena)", pct=0.0)
             return
 
-        for pdf_file in pdf_files:
+        total_files = len(pdf_files)
+        for idx, pdf_file in enumerate(pdf_files):
+            if progress_callback:
+                progress_callback(f"Generuji náhled ({idx+1}/{total_files}): {os.path.basename(pdf_file)}", pct=(idx+1)/total_files)
             try:
                 preview_text = get_pdf_structure_preview(pdf_file, source_dir)
                 logger.info("\n" + preview_text)
@@ -741,7 +779,7 @@ def preview_process(source_dir, source_file=None, progress_callback=None):
                 logger.error(f"Chyba při generování náhledu pro '{pdf_file}': {e}")
 
         if progress_callback:
-            progress_callback("Náhled struktury dokončen")
+            progress_callback("Náhled struktury dokončen", pct=1.0)
     finally:
         pythoncom.CoUninitialize()
 
@@ -759,6 +797,8 @@ def main_process(source_dir, target_dir=None, source_file=None, progress_callbac
             logger.info("Target Directory: (Same folder as source PDF files)")
 
         # Fast O(1) file index building
+        if progress_callback:
+            progress_callback("Indexuji soubory ve zdrojovém adresáři...", pct=0.02)
         build_source_file_index(source_dir)
 
         pdf_files = get_pdf_files_to_process(source_dir, source_file)
@@ -766,21 +806,37 @@ def main_process(source_dir, target_dir=None, source_file=None, progress_callbac
         if not pdf_files:
             logger.warning("No target PDF files found.")
             if progress_callback:
-                progress_callback("Finished (No PDFs found)")
+                progress_callback("Dokončeno (Žádná PDF nenalezena)", pct=0.0)
             return
 
-        logger.info(f"Found {len(pdf_files)} PDF file(s) to process.")
+        total_files = len(pdf_files)
+        logger.info(f"Found {total_files} PDF file(s) to process.")
+        created_files = []
+
         for idx, pdf_file in enumerate(pdf_files):
+            filename_only = os.path.basename(pdf_file)
+            
+            def file_page_callback(curr_p, total_p):
+                pct = (idx + (curr_p / max(total_p, 1))) / total_files
+                msg = f"Zpracovávám soubor {idx+1}/{total_files}: {filename_only} (strana {curr_p}/{total_p})"
+                if progress_callback:
+                    progress_callback(msg, pct=pct)
+
             try:
-                scan_and_merge_pdf(pdf_file, source_dir, target_dir)
+                out_path = scan_and_merge_pdf(pdf_file, source_dir, target_dir, progress_callback=file_page_callback)
+                if out_path:
+                    created_files.append(out_path)
             except Exception as e:
                 logger.error(f"Error processing PDF '{pdf_file}': {e}. Skipping file and continuing...", exc_info=True)
-                
+
+            if progress_callback:
+                progress_callback(f"Dokončen soubor {idx+1}/{total_files}: {filename_only}", pct=(idx+1)/total_files)
+
         logger.info("Keeping temporary converted files for verification.")
         logger.info("Documentation merging process finished.")
         
         if progress_callback:
-            progress_callback("Finished successfully!")
+            progress_callback("Slučování dokončeno úspěšně!", pct=1.0, created_files=created_files)
     finally:
         # Gracefully shut down MS Office COM processes
         COM_MANAGER.close_all()
@@ -978,184 +1034,615 @@ def analyze_pdf_structure_for_split(src_path):
     doc.close()
     return sections
 
-# GUI class with tabs for merging and splitting
-class MergerApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("ePlan Documentation Merger & Splitter")
-        self.root.geometry("860x720")
-        self.root.minsize(720, 560)
-        
-        self.style = ttk.Style()
+def get_resource_path(relative_path):
+    """Resolvše resource paths for both devšelopment and PyInstaller frozen builds."""
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
+
+# =========================================================================
+# GUI class with tabs for merging, splitting, and help – customtkinter
+# =========================================================================
+
+class MergerApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        # Window Settings
+        self.title("ePlan Documentation Merger & Splitter")
+        self.geometry("950x750")
+        self.minsize(800, 600)
+
+        # Force window to front
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(500, lambda: self.attributes("-topmost", False))
+
+        # Set Window Icon
         try:
-            self.style.theme_use('vista')
+            ico_path = get_resource_path(os.path.join("grafika", "ikona.ico"))
+            if os.path.exists(ico_path):
+                self.iconbitmap(ico_path)
+            else:
+                png_path = get_resource_path(os.path.join("grafika", "ikona.png"))
+                if os.path.exists(png_path):
+                    from PIL import Image, ImageTk
+                    icon_photo = ImageTk.PhotoImage(Image.open(png_path))
+                    self.wm_iconphoto(True, icon_photo)
+                    self._icon_photo_ref = icon_photo
+        except Exception as e:
+            logger.error(f"Failed to set window icon: {e}")
+
+        # State variables for split
+        self.split_detected_sections = []
+        self.split_section_rows = []
+
+        # Build UI
+        self.create_widgets()
+
+        # Show splash screen overlay
+        self.show_splash_overlay()
+
+    def show_splash_overlay(self):
+        """Displays splash screen as an overlay frame directly inside main window."""
+        self.splash_overlay = ctk.CTkFrame(
+            self,
+            corner_radius=0,
+            fg_color=["#1a1a1a", "#111111"]
+        )
+        self.splash_overlay.grid(row=0, column=0, sticky="nsew")
+        self.splash_overlay.grid_columnconfigure(0, weight=1)
+        self.splash_overlay.grid_rowconfigure(0, weight=1)
+
+        # Centered splash card (650x420)
+        self.splash_card = ctk.CTkFrame(
+            self.splash_overlay,
+            width=650,
+            height=420,
+            corner_radius=16,
+            border_width=2,
+            border_color=["#1f538d", "#60b0f4"]
+        )
+        self.splash_card.place(relx=0.5, rely=0.5, anchor="center")
+        self.splash_card.grid_columnconfigure(0, weight=1)
+
+        # Logo - enlarged 2x (logo_height = 200)
+        try:
+            logo_path = get_resource_path(os.path.join("grafika", "logo.png"))
+            if os.path.exists(logo_path):
+                from PIL import Image
+                logo_img_raw = Image.open(logo_path)
+                aspect_ratio = logo_img_raw.width / logo_img_raw.height
+                logo_height = 200
+                logo_width = int(logo_height * aspect_ratio)
+
+                self.splash_logo_img = ctk.CTkImage(
+                    light_image=logo_img_raw,
+                    dark_image=logo_img_raw,
+                    size=(logo_width, logo_height)
+                )
+                self.splash_logo_lbl = ctk.CTkLabel(
+                    self.splash_card,
+                    image=self.splash_logo_img,
+                    text=""
+                )
+                self.splash_logo_lbl.pack(pady=(30, 10))
+            else:
+                raise FileNotFoundError
         except Exception:
-            pass
+            self.splash_logo_lbl = ctk.CTkLabel(
+                self.splash_card,
+                text="📋 ePlan Merger",
+                font=ctk.CTkFont(family="Arial", size=48, weight="bold")
+            )
+            self.splash_logo_lbl.pack(pady=(40, 10))
 
-        main_frame = ttk.Frame(root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Title
+        ctk.CTkLabel(
+            self.splash_card,
+            text="ePlan Documentation Merger",
+            font=ctk.CTkFont(family="Arial", size=24, weight="bold")
+        ).pack(pady=(0, 5))
 
-        header_label = ttk.Label(main_frame, text="ePlan Documentation Tool", font=("Segoe UI", 16, "bold"))
-        header_label.pack(anchor=tk.W, pady=(0, 10))
+        # Subtitle
+        ctk.CTkLabel(
+            self.splash_card,
+            text="Spouštění aplikace...",
+            font=ctk.CTkFont(size=14, slant="italic"),
+            text_color="gray"
+        ).pack(pady=(0, 15))
 
-        # Notebook tabs
-        self.notebook = ttk.Notebook(main_frame)
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        # Progress bar
+        self.splash_progress = ctk.CTkProgressBar(self.splash_card, width=450, height=8)
+        self.splash_progress.pack(pady=(0, 25))
+        self.splash_progress.set(0)
 
-        self.tab_merge = ttk.Frame(self.notebook, padding="10")
-        self.tab_split = ttk.Frame(self.notebook, padding="10")
+        # Animation state
+        self.splash_progress_val = 0
+        self.animate_splash()
 
-        self.notebook.add(self.tab_merge, text=" 🔗 Slučování PDF ")
-        self.notebook.add(self.tab_split, text=" ✂️ Rozdělování PDF ")
+    def animate_splash(self):
+        if not hasattr(self, 'splash_overlay') or not self.splash_overlay.winfo_exists():
+            return
+        if self.splash_progress_val < 1.0:
+            self.splash_progress_val += 0.04
+            if self.splash_progress_val > 1.0:
+                self.splash_progress_val = 1.0
+            self.splash_progress.set(self.splash_progress_val)
+            self.after(35, self.animate_splash)
+        else:
+            self.after(200, self.hide_splash_overlay)
+
+    def hide_splash_overlay(self):
+        if hasattr(self, 'splash_overlay') and self.splash_overlay.winfo_exists():
+            self.splash_overlay.destroy()
+
+    def create_widgets(self):
+        # Configure Grid Layout
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # --- Tabview ---
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=0, column=0, padx=15, pady=(15, 15), sticky="nsew")
+
+        self.tab_merge = self.tabview.add("🔗 Slučování")
+        self.tab_split = self.tabview.add("✂️ Rozdělování")
+        self.tab_help = self.tabview.add("❓ Nápověda")
 
         self.setup_merge_tab()
         self.setup_split_tab()
-
+        self.setup_help_tab()
         self.setup_logging()
 
+    # =========================================================================
+    # MERGE TAB
+    # =========================================================================
+
     def setup_merge_tab(self):
-        fields_frame = ttk.LabelFrame(self.tab_merge, text=" Configuration (Konfigurace) ", padding="15")
-        fields_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        ttk.Label(fields_frame, text="Source Directory (Zdrojový adresář):").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.source_entry = ttk.Entry(fields_frame, width=50)
-        self.source_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
+        self.tab_merge.grid_columnconfigure(0, weight=1)
+        self.tab_merge.grid_rowconfigure(1, weight=1)
+
+        # --- Configuration Frame ---
+        config_frame = ctk.CTkFrame(self.tab_merge)
+        config_frame.grid(row=0, column=0, padx=20, pady=(15, 10), sticky="ew")
+        config_frame.grid_columnconfigure(1, weight=1)
+
+        # Row 0: Source Directory
+        ctk.CTkLabel(config_frame, text="Zdrojový adresář:", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, padx=(15, 5), pady=10, sticky="w"
+        )
+
+        self.source_entry = ctk.CTkEntry(config_frame, placeholder_text="Vyberte adresář se zdrojovými PDF soubory...")
+        self.source_entry.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
         self.source_entry.insert(0, get_base_path())
-        
-        source_btn = ttk.Button(fields_frame, text="Browse Folder...", command=self.browse_source)
-        source_btn.grid(row=0, column=2, padx=5, pady=5)
-        
-        ttk.Label(fields_frame, text="Source File (Zdrojový soubor - volitelně):").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.source_file_entry = ttk.Entry(fields_frame, width=50)
-        self.source_file_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
-        source_file_btn = ttk.Button(fields_frame, text="Browse File...", command=self.browse_source_file)
-        source_file_btn.grid(row=1, column=2, padx=5, pady=5)
-        
-        ttk.Label(fields_frame, text="Target Directory (Cílový adresář - volitelně):").grid(row=2, column=0, sticky=tk.W, pady=5)
-        self.target_entry = ttk.Entry(fields_frame, width=50)
-        self.target_entry.grid(row=2, column=1, padx=5, pady=5, sticky=tk.EW)
-        target_btn = ttk.Button(fields_frame, text="Browse Folder...", command=self.browse_target)
-        target_btn.grid(row=2, column=2, padx=5, pady=5)
-        
-        fields_frame.columnconfigure(1, weight=1)
-        
-        log_frame = ttk.LabelFrame(self.tab_merge, text=" Progress Log & Structure (Průběh a Náhled) ", padding="10")
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
-        
-        self.log_text = ScrolledText(log_frame, state='disabled', height=14, font=("Consolas", 9))
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-        
-        action_frame = ttk.Frame(self.tab_merge)
-        action_frame.pack(fill=tk.X)
-        
-        self.status_label = ttk.Label(action_frame, text="Ready", font=("Segoe UI", 10, "italic"))
-        self.status_label.pack(side=tk.LEFT, pady=5)
-        
-        self.preview_button = ttk.Button(action_frame, text="Náhled struktury (Preview)", command=self.start_preview)
-        self.preview_button.pack(side=tk.RIGHT, pady=5, padx=(0, 5), ipadx=5)
-        
-        self.run_button = ttk.Button(action_frame, text="Run Merger (Spustit)", command=self.start_process)
-        self.run_button.pack(side=tk.RIGHT, pady=5, ipadx=10)
+        self.source_entry.bind("<FocusOut>", lambda e: self.sync_source_to_split(self.source_entry.get().strip()))
+
+        ctk.CTkButton(
+            config_frame, text="Procházet...", width=90, command=self.browse_source
+        ).grid(row=0, column=2, padx=5, pady=10, sticky="e")
+
+        ctk.CTkButton(
+            config_frame, text="📂 Otevřít", width=90, command=self.open_merge_src
+        ).grid(row=0, column=3, padx=(5, 15), pady=10, sticky="e")
+
+        # Row 1: Source File (optional)
+        ctk.CTkLabel(config_frame, text="Zdrojový soubor (volitelně):", font=ctk.CTkFont(weight="bold")).grid(
+            row=1, column=0, padx=(15, 5), pady=10, sticky="w"
+        )
+
+        self.source_file_entry = ctk.CTkEntry(config_frame, placeholder_text="Vyberte konkrétní PDF soubor (nebo ponechte prázdné pro zpracování všech)...")
+        self.source_file_entry.grid(row=1, column=1, padx=5, pady=10, sticky="ew")
+
+        ctk.CTkButton(
+            config_frame, text="Procházet...", width=90, command=self.browse_source_file
+        ).grid(row=1, column=2, padx=(5, 15), pady=10, sticky="e", columnspan=2)
+
+        # Row 2: Target Directory (optional)
+        ctk.CTkLabel(config_frame, text="Cílový adresář (volitelně):", font=ctk.CTkFont(weight="bold")).grid(
+            row=2, column=0, padx=(15, 5), pady=10, sticky="w"
+        )
+
+        self.target_entry = ctk.CTkEntry(config_frame, placeholder_text="Ponechte prázdné pro uložení vedle zdroje s příponou _complete.pdf...")
+        self.target_entry.grid(row=2, column=1, padx=5, pady=10, sticky="ew")
+
+        ctk.CTkButton(
+            config_frame, text="Procházet...", width=90, command=self.browse_target
+        ).grid(row=2, column=2, padx=5, pady=10, sticky="e")
+
+        ctk.CTkButton(
+            config_frame, text="📂 Otevřít", width=90, command=self.open_merge_dst
+        ).grid(row=2, column=3, padx=(5, 15), pady=10, sticky="e")
+
+        # --- Log Frame ---
+        log_frame = ctk.CTkFrame(self.tab_merge)
+        log_frame.grid(row=1, column=0, padx=20, pady=(5, 10), sticky="nsew")
+        log_frame.grid_columnconfigure(0, weight=1)
+        log_frame.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            log_frame, text="Průběh a náhled struktury:",
+            font=ctk.CTkFont(size=13, weight="bold")
+        ).grid(row=0, column=0, padx=15, pady=(10, 2), sticky="w")
+
+        self.log_text = ctk.CTkTextbox(
+            log_frame,
+            font=ctk.CTkFont(family="Courier", size=11),
+            state="disabled"
+        )
+        self.log_text.grid(row=1, column=0, padx=10, pady=(5, 10), sticky="nsew")
+
+        # --- Bottom Action Frame ---
+        action_frame = ctk.CTkFrame(self.tab_merge, fg_color="transparent")
+        action_frame.grid(row=2, column=0, padx=20, pady=(0, 15), sticky="ew")
+        action_frame.grid_columnconfigure(0, weight=1)
+
+        self.status_label = ctk.CTkLabel(
+            action_frame, text="Připraven",
+            font=ctk.CTkFont(size=12, slant="italic"),
+            text_color="gray"
+        )
+        self.status_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
+
+        self.merge_progress_bar = ctk.CTkProgressBar(action_frame, orientation="horizontal", height=8)
+        self.merge_progress_bar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        self.merge_progress_bar.set(0)
+
+        self.preview_button = ctk.CTkButton(
+            action_frame,
+            text="📋 Náhled struktury (Preview)",
+            width=200,
+            font=ctk.CTkFont(weight="bold"),
+            command=self.start_preview
+        )
+        self.preview_button.grid(row=2, column=0, sticky="w")
+
+        self.run_button = ctk.CTkButton(
+            action_frame,
+            text="▶  Spustit slučování (Run Merger)",
+            width=220,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#2B7A78",
+            hover_color="#175856",
+            command=self.start_process
+        )
+        self.run_button.grid(row=2, column=2, sticky="e")
+
+    # =========================================================================
+    # SPLIT TAB
+    # =========================================================================
 
     def setup_split_tab(self):
-        split_cfg = ttk.LabelFrame(self.tab_split, text=" Konfigurace rozdělování ", padding="10")
-        split_cfg.pack(fill=tk.X, pady=(0, 10))
+        self.tab_split.grid_columnconfigure(0, weight=1)
+        self.tab_split.grid_rowconfigure(2, weight=1)
 
-        ttk.Label(split_cfg, text="Zdrojový PDF soubor:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.split_src_entry = ttk.Entry(split_cfg, width=45)
-        self.split_src_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
-        
-        btn_src_browse = ttk.Button(split_cfg, text="Procházet...", command=self.browse_split_src)
-        btn_src_browse.grid(row=0, column=2, padx=5, pady=5)
+        # --- Top Section: Source PDF and Output Folder ---
+        top_frame = ctk.CTkFrame(self.tab_split)
+        top_frame.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="ew")
+        top_frame.grid_columnconfigure(1, weight=1)
 
-        self.btn_analyze = ttk.Button(split_cfg, text="🔍 Analýza struktury", command=self.start_split_analysis)
-        self.btn_analyze.grid(row=0, column=3, padx=5, pady=5)
+        # Row 0: Source PDF
+        ctk.CTkLabel(top_frame, text="Zdrojový PDF soubor:", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, padx=(15, 5), pady=10, sticky="w"
+        )
 
-        ttk.Label(split_cfg, text="Cílová složka:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.split_dst_entry = ttk.Entry(split_cfg, width=45)
-        self.split_dst_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
+        self.split_src_entry = ctk.CTkEntry(
+            top_frame,
+            placeholder_text="Vyberte PDF soubor pro rozdělení (např. D23154_V7.1_20250306110226_complete.pdf)..."
+        )
+        self.split_src_entry.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
+        self.split_src_entry.bind("<FocusOut>", lambda e: self._on_split_src_focus_out())
+
+        ctk.CTkButton(
+            top_frame, text="Procházet...", width=100, command=self.browse_split_src
+        ).grid(row=0, column=2, padx=(5, 5), pady=10, sticky="e")
+
+        self.btn_analyze = ctk.CTkButton(
+            top_frame, text="🔍 Analýza struktury", width=140,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#1f538d", hover_color="#174170",
+            command=self.start_split_analysis
+        )
+        self.btn_analyze.grid(row=0, column=3, padx=(5, 15), pady=10, sticky="e")
+
+        # Row 1: Destination Folder
+        ctk.CTkLabel(top_frame, text="Cílový adresář:", font=ctk.CTkFont(weight="bold")).grid(
+            row=1, column=0, padx=(15, 5), pady=(0, 10), sticky="w"
+        )
+
+        self.split_dst_entry = ctk.CTkEntry(
+            top_frame, placeholder_text="Vyberte složku pro uložení rozdělených PDF..."
+        )
+        self.split_dst_entry.grid(row=1, column=1, columnspan=2, padx=5, pady=(0, 10), sticky="ew")
         self.split_dst_entry.insert(0, get_base_path())
+        self.split_dst_entry.bind("<FocusOut>", lambda e: self.sync_split_to_source(self.split_dst_entry.get().strip()))
 
-        btn_dst_browse = ttk.Button(split_cfg, text="Procházet...", command=self.browse_split_dst)
-        btn_dst_browse.grid(row=1, column=2, padx=5, pady=5)
+        ctk.CTkButton(
+            top_frame, text="Procházet...", width=100, command=self.browse_split_dst
+        ).grid(row=1, column=3, padx=(5, 15), pady=(0, 10), sticky="e")
 
-        split_cfg.columnconfigure(1, weight=1)
+        # --- Middle Section: Options & Table Header ---
+        mid_frame = ctk.CTkFrame(self.tab_split)
+        mid_frame.grid(row=1, column=0, padx=20, pady=5, sticky="ew")
+        mid_frame.grid_columnconfigure(0, weight=1)
 
-        # Options bar
-        opt_frame = ttk.Frame(self.tab_split)
-        opt_frame.pack(fill=tk.X, pady=(0, 5))
+        self.split_title_lbl = ctk.CTkLabel(
+            mid_frame, text="Nalezené části dokumentace (vyberte PDF soubor pro analýzu):",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.split_title_lbl.pack(anchor="w", padx=15, pady=(8, 4))
 
-        btn_check_all = ttk.Button(opt_frame, text="Označit vše", command=self.split_check_all)
-        btn_check_all.pack(side=tk.LEFT, padx=(0, 5))
+        # Check/Uncheck all & options
+        opts_subframe = ctk.CTkFrame(mid_frame, fg_color="transparent")
+        opts_subframe.pack(fill="x", padx=15, pady=(0, 5))
 
-        btn_uncheck_all = ttk.Button(opt_frame, text="Odznačit vše", command=self.split_uncheck_all)
-        btn_uncheck_all.pack(side=tk.LEFT, padx=(0, 15))
+        ctk.CTkButton(
+            opts_subframe, text="Označit vše", width=100, height=26,
+            font=ctk.CTkFont(size=11), command=self.split_check_all
+        ).pack(side="left", padx=(0, 5))
 
-        btn_edit_selected = ttk.Button(opt_frame, text="✏️ Přejmenovat vybraný soubor", command=self.edit_selected_split_filename)
-        btn_edit_selected.pack(side=tk.LEFT, padx=(0, 15))
+        ctk.CTkButton(
+            opts_subframe, text="Odznačit vše", width=100, height=26,
+            font=ctk.CTkFont(size=11), command=self.split_uncheck_all
+        ).pack(side="left", padx=(0, 15))
 
         self.split_export_cover_var = tk.BooleanVar(value=True)
-        cb_cover = ttk.Checkbutton(opt_frame, text="Exportovat Seznam příloh / Úvodní část", variable=self.split_export_cover_var)
-        cb_cover.pack(side=tk.LEFT)
+        ctk.CTkCheckBox(
+            opts_subframe, text="Exportovat Seznam příloh / Úvodní část",
+            variable=self.split_export_cover_var
+        ).pack(side="left", padx=(0, 15))
 
-        # Sections Table
-        table_frame = ttk.LabelFrame(self.tab_split, text=" Nalezené části dokumentace ", padding="5")
-        table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        # Table Header Row
+        header_row = ctk.CTkFrame(mid_frame, height=28)
+        header_row.pack(fill="x", padx=15, pady=(5, 0))
 
-        columns = ("export", "name", "code", "pages", "filename")
-        self.split_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=8)
-        
-        self.split_tree.heading("export", text="Export")
-        self.split_tree.heading("name", text="Část dokumentace")
-        self.split_tree.heading("code", text="Kód")
-        self.split_tree.heading("pages", text="Strany")
-        self.split_tree.heading("filename", text="Výstupní název souboru (Dvojklik / Tlačítko pro úpravu)")
+        ctk.CTkLabel(header_row, text="Export", font=ctk.CTkFont(size=11, weight="bold"), width=55).pack(side="left", padx=(10, 5))
+        ctk.CTkLabel(header_row, text="Část dokumentace", font=ctk.CTkFont(size=11, weight="bold"), width=200, anchor="w").pack(side="left", padx=5)
+        ctk.CTkLabel(header_row, text="Kód", font=ctk.CTkFont(size=11, weight="bold"), width=60, anchor="center").pack(side="left", padx=5)
+        ctk.CTkLabel(header_row, text="Strany", font=ctk.CTkFont(size=11, weight="bold"), width=80, anchor="center").pack(side="left", padx=5)
+        ctk.CTkLabel(header_row, text="Výstupní název souboru (klikněte pro úpravu)", font=ctk.CTkFont(size=11, weight="bold"), anchor="w").pack(side="left", padx=5, fill="x", expand=True)
 
-        self.split_tree.column("export", width=60, anchor="center")
-        self.split_tree.column("name", width=220, anchor="w")
-        self.split_tree.column("code", width=60, anchor="center")
-        self.split_tree.column("pages", width=90, anchor="center")
-        self.split_tree.column("filename", width=300, anchor="w")
+        # --- Scrollable Sections Table ---
+        self.split_sections_scroll_frame = ctk.CTkScrollableFrame(self.tab_split, height=200)
+        self.split_sections_scroll_frame.grid(row=2, column=0, padx=20, pady=5, sticky="nsew")
 
-        tree_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.split_tree.yview)
-        self.split_tree.configure(yscrollcommand=tree_scroll.set)
+        # --- Bottom: Log & Actions ---
+        bottom_frame = ctk.CTkFrame(self.tab_split)
+        bottom_frame.grid(row=3, column=0, padx=20, pady=(5, 15), sticky="ew")
+        bottom_frame.grid_columnconfigure(0, weight=1)
+        bottom_frame.grid_rowconfigure(2, weight=1)
 
-        self.split_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.split_status_lbl = ctk.CTkLabel(
+            bottom_frame, text="Připraven k rozdělení",
+            font=ctk.CTkFont(size=12, slant="italic"), text_color="gray"
+        )
+        self.split_status_lbl.grid(row=0, column=0, padx=15, pady=(8, 2), sticky="w")
 
-        self.split_tree.bind("<Button-1>", self.on_split_tree_click)
-        self.split_tree.bind("<Double-1>", self.on_split_tree_double_click)
+        self.split_progress_bar = ctk.CTkProgressBar(bottom_frame, orientation="horizontal", height=8)
+        self.split_progress_bar.grid(row=1, column=0, padx=10, pady=(2, 5), sticky="ew")
+        self.split_progress_bar.set(0)
 
-        # Log & Action frame
-        split_log_frame = ttk.LabelFrame(self.tab_split, text=" Průběh rozdělování ", padding="5")
-        split_log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        self.split_log_text = ctk.CTkTextbox(
+            bottom_frame,
+            font=ctk.CTkFont(family="Courier", size=11),
+            state="disabled",
+            height=100
+        )
+        self.split_log_text.grid(row=2, column=0, padx=10, pady=(5, 5), sticky="nsew")
 
-        self.split_log_text = ScrolledText(split_log_frame, state='disabled', height=6, font=("Consolas", 9))
-        self.split_log_text.pack(fill=tk.BOTH, expand=True)
+        # Action buttons
+        btn_frame = ctk.CTkFrame(bottom_frame, fg_color="transparent")
+        btn_frame.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
 
-        split_action_frame = ttk.Frame(self.tab_split)
-        split_action_frame.pack(fill=tk.X)
+        self.btn_run_split = ctk.CTkButton(
+            btn_frame,
+            text="▶  Rozdělit PDF dokument",
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#2B7A78", hover_color="#175856",
+            command=self.start_split_execution
+        )
+        self.btn_run_split.pack(side="left", padx=(0, 10))
 
-        self.split_status_lbl = ttk.Label(split_action_frame, text="Připraven k rozdělení", font=("Segoe UI", 10, "italic"))
-        self.split_status_lbl.pack(side=tk.LEFT, pady=5)
+        self.btn_open_dst = ctk.CTkButton(
+            btn_frame,
+            text="📂 Otevřít cílovou složku",
+            command=self.open_split_dst
+        )
+        self.btn_open_dst.pack(side="left", padx=(0, 10))
 
-        self.btn_open_dst = ttk.Button(split_action_frame, text="📂 Otevřít cílovou složku", command=self.open_split_dst)
-        self.btn_open_dst.pack(side=tk.RIGHT, padx=(5, 0))
+    # =========================================================================
+    # HELP TAB
+    # =========================================================================
 
-        self.btn_run_split = ttk.Button(split_action_frame, text="▶ Rozdělit PDF dokument", command=self.start_split_execution)
-        self.btn_run_split.pack(side=tk.RIGHT, padx=5)
+    def setup_help_tab(self):
+        self.tab_help.grid_columnconfigure(0, weight=1)
+        self.tab_help.grid_rowconfigure(0, weight=1)
 
-        self.split_detected_sections = []
+        help_scroll = ctk.CTkScrollableFrame(self.tab_help)
+        help_scroll.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        help_scroll.grid_columnconfigure(0, weight=1)
+
+        # Header
+        header_frame = ctk.CTkFrame(help_scroll, fg_color="transparent")
+        header_frame.pack(fill="x", padx=15, pady=(15, 10))
+
+        ctk.CTkLabel(
+            header_frame,
+            text="Uživatelská příručka k programu ePlan Documentation Merger",
+            font=ctk.CTkFont(family="Arial", size=20, weight="bold")
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            header_frame,
+            text="Nástroj pro automatické sloučení a kompletaci projektové dokumentace z ePlan.",
+            font=ctk.CTkFont(size=12, slant="italic"),
+            text_color="gray"
+        ).pack(anchor="w", pady=(2, 0))
+
+        # --- Section 1: Spuštění ---
+        self._help_card(help_scroll, "🚀 Jak program spustit",
+            "• Stáhněte a rozbalte archiv ePlan_Documentation_Merger_portable.zip.\n"
+            "• Spusťte soubor ePlan_Documentation_Merger_portable.exe.\n"
+            "• Pokud se zobrazí upozornění filtru SmartScreen, klikněte na 'Více informací' → 'Spustit i přesto'.\n\n"
+            "ℹ️ Pro převod Word (.docx, .doc) a Excel (.xlsx, .xls) je nutný MS Office.\n"
+            "   Převod výkresů DWG funguje samostatně bez AutoCADu."
+        )
+
+        # --- Section 2: Slučování ---
+        self._help_card(help_scroll, "🔗 Slučování PDF – záložka 'Slučování'",
+            "• Zdrojový adresář: Složka s hlavními PDF soubory a všemi přílohami.\n"
+            "• Zdrojový soubor (volitelně): Konkrétní PDF soubor, nebo ponechte prázdné pro zpracování všech.\n"
+            "• Cílový adresář (volitelně): Kam se uloží sloučené PDF. Pokud prázdné, uloží se vedle zdroje s příponou _complete.pdf.\n\n"
+            "• Náhled struktury (Preview): Zobrazí stromový náhled dokumentu s přílohami bez spuštění slučování.\n"
+            "• Run Merger (Spustit): Spustí kompletní proces slučování na pozadí."
+        )
+
+        # --- Section 3: Formáty ---
+        self._help_card(help_scroll, "📄 Jak program zpracovává jednotlivé formáty",
+            "• PDF dokumenty: Sloučí přímo bez konverze.\n"
+            "• Word / Excel: Otevře přes MS Office COM rozhraní, exportuje do PDF.\n"
+            "• DWG / DXF výkresy:\n"
+            "  - Převede DWG na DXF pomocí ODAFileConverter.\n"
+            "  - Pokud výkres obsahuje rozvržení (Paperspace) s výřezy, vyrenderuje je.\n"
+            "  - Pokud jsou rozvržení prázdná, vyrenderuje celý Model.\n"
+            "• Obrázky (PNG, JPG, BMP, TIFF): Automaticky převede na PDF stránku."
+        )
+
+        # --- Section 4: Rozdělování ---
+        self._help_card(help_scroll, "✂️ Rozdělování PDF podle částí dokumentace",
+            "• Automatická detekce: Identifikuje sekce (&TZ, &SM, &VV, &BS, &TZ1 atd.) podle záložek i textového skenu.\n"
+            "• Přesné názvy: Výstupní PDF se pojmenují dle archivačních čísel (např. D231542633.TZ.pdf).\n"
+            "• Úvodní část: Seznam příloh se exportuje zvlášť (např. D23154_00_Seznam_příloh.pdf).\n"
+            "• Náhled před exportem: V tabulce můžete změnit názvy nebo odškrtnout sekce."
+        )
+
+        # --- Section 5: Troubleshooting ---
+        self._help_card(help_scroll, "🛠️ Řešení problémů",
+            "• Chyba / Přeskočení souboru: Program chybu přeskočí a pokračuje dál.\n"
+            "  U chybějícího souboru ponechá původní zástupnou stránku s odkazem.\n"
+            "• 'Target file not found': Ujistěte se, že se soubor jmenuje přesně tak, jak je v odkazu,\n"
+            "  a nachází se ve zdrojovém adresáři nebo jeho podsložkách."
+        )
+
+        # --- Section 6: GitHub Repozitář ---
+        card_git = ctk.CTkFrame(help_scroll)
+        card_git.pack(fill="x", padx=15, pady=10)
+
+        ctk.CTkLabel(
+            card_git, text="🌐 GitHub Repozitář a zdrojový kód",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=["#1f538d", "#60b0f4"]
+        ).pack(anchor="w", padx=15, pady=(10, 5))
+
+        ctk.CTkLabel(
+            card_git,
+            text="Projekt, zdrojové kódy a vývojový repozitář naleznete na GitHubu:\nhttps://github.com/Jamilb13/ePlan-complete",
+            justify="left", anchor="w",
+            font=ctk.CTkFont(size=12)
+        ).pack(anchor="w", padx=15, pady=(0, 10))
+
+        ctk.CTkButton(
+            card_git,
+            text="🔗 Otevřít GitHub repozitář",
+            font=ctk.CTkFont(weight="bold"),
+            width=220,
+            command=lambda: webbrowser.open("https://github.com/Jamilb13/ePlan-complete")
+        ).pack(anchor="w", padx=15, pady=(0, 15))
+
+    def _help_card(self, parent, title, text):
+        """Helper to create a styled help card."""
+        card = ctk.CTkFrame(parent)
+        card.pack(fill="x", padx=15, pady=10)
+
+        ctk.CTkLabel(
+            card, text=title,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=["#1f538d", "#60b0f4"]
+        ).pack(anchor="w", padx=15, pady=(10, 5))
+
+        ctk.CTkLabel(
+            card, text=text,
+            justify="left", anchor="w",
+            font=ctk.CTkFont(size=12),
+            wraplength=720
+        ).pack(anchor="w", padx=15, pady=(0, 15))
+
+    # =========================================================================
+    # LOGGING SETUP
+    # =========================================================================
 
     def setup_logging(self):
         if not logger.handlers:
             handler = TextHandler(self.log_text)
             handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%H:%M:%S"))
             logger.addHandler(handler)
-            
+
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s"))
             logger.addHandler(console_handler)
+
+    # =========================================================================
+    # DIRECTORY SYNC & OPEN HELPERS
+    # =========================================================================
+
+    def sync_source_to_split(self, src_dir):
+        """Synchronizes source directory from Merge tab to Split tab."""
+        if src_dir and os.path.exists(src_dir):
+            if os.path.isfile(src_dir):
+                src_dir = os.path.dirname(src_dir)
+            current_split_dst = self.split_dst_entry.get().strip()
+            if not current_split_dst or current_split_dst == get_base_path():
+                self.split_dst_entry.delete(0, tk.END)
+                self.split_dst_entry.insert(0, src_dir)
+
+    def sync_split_to_source(self, dir_path):
+        """Synchronizes directory from Split tab to Merge tab."""
+        if dir_path and os.path.exists(dir_path):
+            if os.path.isfile(dir_path):
+                dir_path = os.path.dirname(dir_path)
+            current_merge_src = self.source_entry.get().strip()
+            if not current_merge_src or current_merge_src == get_base_path():
+                self.source_entry.delete(0, tk.END)
+                self.source_entry.insert(0, dir_path)
+
+    def _on_split_src_focus_out(self):
+        val = self.split_src_entry.get().strip()
+        if val and os.path.exists(val):
+            src_dir = os.path.dirname(val) if os.path.isfile(val) else val
+            self.sync_split_to_source(src_dir)
+
+    def open_merge_src(self):
+        src_dir = self.source_entry.get().strip()
+        if not src_dir and self.source_file_entry.get().strip():
+            src_dir = os.path.dirname(self.source_file_entry.get().strip())
+        if src_dir and os.path.exists(src_dir):
+            if os.path.isfile(src_dir):
+                src_dir = os.path.dirname(src_dir)
+            try:
+                os.startfile(src_dir)
+            except Exception as e:
+                messagebox.showerror("Chyba", f"Nelze otevřít složku:\n{e}")
+        else:
+            messagebox.showerror("Chyba", f"Zdrojová složka neexistuje:\n{src_dir}")
+
+    def open_merge_dst(self):
+        dst_dir = self.target_entry.get().strip()
+        if not dst_dir:
+            dst_dir = self.source_entry.get().strip()
+        if dst_dir and os.path.exists(dst_dir):
+            if os.path.isfile(dst_dir):
+                dst_dir = os.path.dirname(dst_dir)
+            try:
+                os.startfile(dst_dir)
+            except Exception as e:
+                messagebox.showerror("Chyba", f"Nelze otevřít složku:\n{e}")
+        else:
+            messagebox.showerror("Chyba", f"Cílová složka neexistuje nebo nebyla zadána:\n{dst_dir}")
+
+    # =========================================================================
+    # SPLIT TAB – logging helpers
+    # =========================================================================
 
     def _split_log(self, msg):
         def append():
@@ -1170,12 +1657,18 @@ class MergerApp:
         self.split_log_text.delete('1.0', tk.END)
         self.split_log_text.configure(state='disabled')
 
+    # =========================================================================
+    # MERGE TAB – browse and action callbacks
+    # =========================================================================
+
     def browse_source(self):
         dir_path = filedialog.askdirectory(initialdir=self.source_entry.get())
         if dir_path:
+            norm_dir = os.path.normpath(dir_path)
             self.source_entry.delete(0, tk.END)
-            self.source_entry.insert(0, os.path.normpath(dir_path))
-            
+            self.source_entry.insert(0, norm_dir)
+            self.sync_source_to_split(norm_dir)
+
     def browse_source_file(self):
         initial_dir = self.source_entry.get() if self.source_entry.get() else get_base_path()
         file_path = filedialog.askopenfilename(
@@ -1192,11 +1685,12 @@ class MergerApp:
             file_path_norm = os.path.normpath(file_path)
             self.source_file_entry.delete(0, tk.END)
             self.source_file_entry.insert(0, file_path_norm)
-            
+
             file_dir = os.path.dirname(file_path_norm)
             if file_dir:
                 self.source_entry.delete(0, tk.END)
                 self.source_entry.insert(0, file_dir)
+                self.sync_source_to_split(file_dir)
 
     def browse_target(self):
         dir_path = filedialog.askdirectory(initialdir=self.source_entry.get())
@@ -1204,8 +1698,129 @@ class MergerApp:
             self.target_entry.delete(0, tk.END)
             self.target_entry.insert(0, os.path.normpath(dir_path))
 
+    def update_merge_progress(self, status, pct=None):
+        def _gui_update():
+            if status is not None:
+                if pct is not None and pct > 0:
+                    pct_int = min(100, int(pct * 100))
+                    self.status_label.configure(text=f"{pct_int}% - {status}")
+                else:
+                    self.status_label.configure(text=status)
+            if pct is not None:
+                self.merge_progress_bar.set(pct)
+        self.after(0, _gui_update)
+
+    def update_status(self, text):
+        self.update_merge_progress(text)
+
+    def validate_inputs(self):
+        source_dir = self.source_entry.get().strip()
+        source_file = self.source_file_entry.get().strip()
+        target_dir = self.target_entry.get().strip()
+
+        if source_file and not os.path.exists(source_file):
+            messagebox.showerror("Error", f"Source file does not exist:\n{source_file}")
+            return None, None, None
+
+        if not source_dir and source_file:
+            source_dir = os.path.dirname(os.path.abspath(source_file))
+            self.source_entry.delete(0, tk.END)
+            self.source_entry.insert(0, source_dir)
+
+        if not source_dir:
+            messagebox.showerror("Error", "Please select a source directory or source file.")
+            return None, None, None
+
+        if not os.path.exists(source_dir):
+            messagebox.showerror("Error", f"Source directory does not exist:\n{source_dir}")
+            return None, None, None
+
+        if target_dir and not os.path.exists(target_dir):
+            messagebox.showerror("Error", f"Target directory does not exist:\n{target_dir}")
+            return None, None, None
+
+        return source_dir, source_file, target_dir
+
+    def process_complete(self, status, pct=1.0, created_files=None):
+        def _finish():
+            self.run_button.configure(state='normal')
+            self.preview_button.configure(state='normal')
+            self.update_merge_progress(status, pct=1.0)
+
+            if created_files and len(created_files) > 0:
+                first_out = created_files[0]
+                if os.path.exists(first_out):
+                    self.split_src_entry.delete(0, tk.END)
+                    self.split_src_entry.insert(0, os.path.normpath(first_out))
+                    dst_folder = os.path.dirname(first_out)
+                    self.split_dst_entry.delete(0, tk.END)
+                    self.split_dst_entry.insert(0, os.path.normpath(dst_folder))
+                    self.start_split_analysis()
+
+            messagebox.showinfo("Hotovo", f"Proces slučování dokončen:\n{status}")
+        self.after(0, _finish)
+
+    def preview_complete(self, status, pct=1.0):
+        def _finish():
+            self.run_button.configure(state='normal')
+            self.preview_button.configure(state='normal')
+            self.update_merge_progress(status, pct=pct)
+        self.after(0, _finish)
+
+    def start_preview(self):
+        source_dir, source_file, _ = self.validate_inputs()
+        if not source_dir:
+            return
+
+        self.run_button.configure(state='disabled')
+        self.preview_button.configure(state='disabled')
+        self.update_merge_progress("Generuji náhled...", pct=0.0)
+
+        self.log_text.configure(state='normal')
+        self.log_text.delete('1.0', tk.END)
+        self.log_text.configure(state='disabled')
+
+        t = threading.Thread(
+            target=preview_process,
+            args=(source_dir, source_file if source_file else None, lambda status, pct=1.0: self.preview_complete(status, pct=pct))
+        )
+        t.daemon = True
+        t.start()
+
+    def start_process(self):
+        source_dir, source_file, target_dir = self.validate_inputs()
+        if not source_dir:
+            return
+
+        self.run_button.configure(state='disabled')
+        self.preview_button.configure(state='disabled')
+        self.update_merge_progress("Zpracovávám...", pct=0.0)
+
+        self.log_text.configure(state='normal')
+        self.log_text.delete('1.0', tk.END)
+        self.log_text.configure(state='disabled')
+
+        CONVERSION_CACHE.clear()
+
+        def _callback(status, pct=None, created_files=None):
+            if pct is not None and pct < 1.0 and not created_files:
+                self.update_merge_progress(status, pct=pct)
+            else:
+                self.process_complete(status, pct=pct if pct is not None else 1.0, created_files=created_files)
+
+        t = threading.Thread(
+            target=main_process,
+            args=(source_dir, target_dir if target_dir else None, source_file if source_file else None, _callback)
+        )
+        t.daemon = True
+        t.start()
+
+    # =========================================================================
+    # SPLIT TAB – browse callbacks
+    # =========================================================================
+
     def browse_split_src(self):
-        initial_dir = os.path.dirname(self.split_src_entry.get()) if self.split_src_entry.get() else get_base_path()
+        initial_dir = os.path.dirname(self.split_src_entry.get()) if self.split_src_entry.get() else (self.source_entry.get() if self.source_entry.get() else get_base_path())
         file_path = filedialog.askopenfilename(
             initialdir=initial_dir,
             title="Vyberte zdrojový PDF soubor k rozdělení",
@@ -1215,76 +1830,99 @@ class MergerApp:
             norm_path = os.path.normpath(file_path)
             self.split_src_entry.delete(0, tk.END)
             self.split_src_entry.insert(0, norm_path)
+            src_dir = os.path.dirname(norm_path)
+            self.sync_split_to_source(src_dir)
             self.start_split_analysis()
 
     def browse_split_dst(self):
-        initial_dir = self.split_dst_entry.get() if self.split_dst_entry.get() else get_base_path()
+        initial_dir = self.split_dst_entry.get() if self.split_dst_entry.get() else (self.source_entry.get() if self.source_entry.get() else get_base_path())
         dir_path = filedialog.askdirectory(initialdir=initial_dir, title="Vyberte složku pro uložení rozdělených PDF")
         if dir_path:
+            norm_dir = os.path.normpath(dir_path)
             self.split_dst_entry.delete(0, tk.END)
-            self.split_dst_entry.insert(0, os.path.normpath(dir_path))
+            self.split_dst_entry.insert(0, norm_dir)
+            self.sync_split_to_source(norm_dir)
+
+    # =========================================================================
+    # SPLIT TAB – section table management
+    # =========================================================================
 
     def split_check_all(self):
         for item in self.split_detected_sections:
             item['export'] = True
-        self.render_split_tree()
+        self.render_split_table()
 
     def split_uncheck_all(self):
         for item in self.split_detected_sections:
             item['export'] = False
-        self.render_split_tree()
+        self.render_split_table()
 
-    def edit_selected_split_filename(self):
-        selected_item = self.split_tree.selection()
-        if not selected_item:
-            messagebox.showinfo("Výběr sekce", "Vyberte v tabulce řádek sekce, kterou chcete přejmenovat.")
-            return
-        idx = int(selected_item[0])
-        if 0 <= idx < len(self.split_detected_sections):
-            sec = self.split_detected_sections[idx]
-            from tkinter.simpledialog import askstring
-            new_name = askstring(
-                "Přejmenování souboru",
-                f"Zadejte nový výstupní název pro část '{sec['name']}' ({sec['code']}):",
-                initialvalue=sec['filename']
+    def render_split_table(self):
+        """Render the sections table using custom CTk widgets inside a scrollable frame."""
+        # Clear existing rows
+        for widget in self.split_sections_scroll_frame.winfo_children():
+            widget.destroy()
+        self.split_section_rows = []
+
+        for idx, sec in enumerate(self.split_detected_sections):
+            row_frame = ctk.CTkFrame(self.split_sections_scroll_frame, height=32)
+            row_frame.pack(fill="x", padx=5, pady=2)
+
+            # Export checkbox
+            var = tk.BooleanVar(value=sec.get('export', True))
+            cb = ctk.CTkCheckBox(
+                row_frame, text="", variable=var, width=30,
+                command=lambda i=idx, v=var: self._toggle_section_export(i, v)
             )
-            if new_name and new_name.strip():
-                clean_name = new_name.strip()
-                if not clean_name.lower().endswith('.pdf'):
-                    clean_name += '.pdf'
-                sec['filename'] = clean_name
-                self.render_split_tree()
+            cb.pack(side="left", padx=(10, 5))
 
-    def on_split_tree_click(self, event):
-        region = self.split_tree.identify("region", event.x, event.y)
-        if region == "cell":
-            column = self.split_tree.identify_column(event.x)
-            if column == "#1":
-                item_id = self.split_tree.identify_row(event.y)
-                if item_id:
-                    idx = int(item_id)
-                    if 0 <= idx < len(self.split_detected_sections):
-                        self.split_detected_sections[idx]['export'] = not self.split_detected_sections[idx]['export']
-                        self.render_split_tree()
+            # Name
+            ctk.CTkLabel(
+                row_frame, text=sec['name'],
+                font=ctk.CTkFont(size=12), width=200, anchor="w"
+            ).pack(side="left", padx=5)
 
-    def on_split_tree_double_click(self, event):
-        item_id = self.split_tree.identify_row(event.y)
-        if item_id:
-            idx = int(item_id)
-            if 0 <= idx < len(self.split_detected_sections):
-                sec = self.split_detected_sections[idx]
-                from tkinter.simpledialog import askstring
-                new_name = askstring(
-                    "Přejmenování souboru",
-                    f"Zadejte nový výstupní název pro část '{sec['name']}' ({sec['code']}):",
-                    initialvalue=sec['filename']
-                )
-                if new_name and new_name.strip():
-                    clean_name = new_name.strip()
-                    if not clean_name.lower().endswith('.pdf'):
-                        clean_name += '.pdf'
-                    sec['filename'] = clean_name
-                    self.render_split_tree()
+            # Code
+            ctk.CTkLabel(
+                row_frame, text=sec['code'],
+                font=ctk.CTkFont(size=12, weight="bold"), width=60, anchor="center"
+            ).pack(side="left", padx=5)
+
+            # Pages
+            pages_str = f"{sec['start_page']}–{sec['end_page']}"
+            ctk.CTkLabel(
+                row_frame, text=pages_str,
+                font=ctk.CTkFont(size=12), width=80, anchor="center"
+            ).pack(side="left", padx=5)
+
+            # Filename (editable entry)
+            fn_entry = ctk.CTkEntry(row_frame, font=ctk.CTkFont(size=12))
+            fn_entry.pack(side="left", padx=5, fill="x", expand=True)
+            fn_entry.insert(0, sec['filename'])
+            fn_entry.bind("<FocusOut>", lambda e, i=idx, ent=fn_entry: self._update_section_filename(i, ent))
+            fn_entry.bind("<Return>", lambda e, i=idx, ent=fn_entry: self._update_section_filename(i, ent))
+
+            self.split_section_rows.append({
+                'frame': row_frame,
+                'checkbox_var': var,
+                'filename_entry': fn_entry
+            })
+
+    def _toggle_section_export(self, idx, var):
+        if 0 <= idx < len(self.split_detected_sections):
+            self.split_detected_sections[idx]['export'] = var.get()
+
+    def _update_section_filename(self, idx, entry_widget):
+        if 0 <= idx < len(self.split_detected_sections):
+            new_name = entry_widget.get().strip()
+            if new_name:
+                if not new_name.lower().endswith('.pdf'):
+                    new_name += '.pdf'
+                self.split_detected_sections[idx]['filename'] = new_name
+
+    # =========================================================================
+    # SPLIT TAB – analysis and execution
+    # =========================================================================
 
     def start_split_analysis(self):
         src_path = self.split_src_entry.get().strip()
@@ -1294,7 +1932,7 @@ class MergerApp:
 
         self._split_log_clear()
         self._split_log(f"Zahajuji analýzu struktury PDF: {os.path.basename(src_path)}")
-        self.split_status_lbl.config(text="Skenuji strukturu PDF...")
+        self.split_status_lbl.configure(text="Skenuji strukturu PDF...")
 
         def _worker():
             try:
@@ -1302,35 +1940,24 @@ class MergerApp:
                 for sec in sections:
                     sec['export'] = True
                 self.split_detected_sections = sections
-                self.root.after(0, self._render_analysis_results)
+                self.after(0, self._render_analysis_results)
             except Exception as e:
-                self.root.after(0, lambda: self._handle_analysis_error(str(e)))
+                self.after(0, lambda: self._handle_analysis_error(str(e)))
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
 
     def _render_analysis_results(self):
-        self.render_split_tree()
+        self.render_split_table()
         count = len(self.split_detected_sections)
         self._split_log(f"Detekováno {count} částí dokumentace.")
-        self.split_status_lbl.config(text=f"Analýza dokončena: Nalezeno {count} částí dokumentace.")
+        self.split_status_lbl.configure(text=f"Analýza dokončena: Nalezeno {count} částí dokumentace.")
+        self.split_title_lbl.configure(text=f"Nalezené části dokumentace ({count}):")
 
     def _handle_analysis_error(self, err_msg):
-        self._split_log(f"❌ Chyba při analýze PDF: {err_msg}")
-        self.split_status_lbl.config(text="Chyba při analýze PDF.")
+        self._split_log(f"✖ Chyba při analýze PDF: {err_msg}")
+        self.split_status_lbl.configure(text="Chyba při analýze PDF.")
         messagebox.showerror("Chyba analýzy", f"Nepodařilo se prozkoumat strukturu PDF:\n{err_msg}")
-
-    def render_split_tree(self):
-        for item in self.split_tree.get_children():
-            self.split_tree.delete(item)
-
-        for idx, sec in enumerate(self.split_detected_sections):
-            check_str = "☑ Ano" if sec.get('export', True) else "☐ Ne"
-            pages_str = f"{sec['start_page']}–{sec['end_page']}"
-            self.split_tree.insert(
-                "", "end", iid=str(idx),
-                values=(check_str, sec['name'], sec['code'], pages_str, sec['filename'])
-            )
 
     def start_split_execution(self):
         src_path = self.split_src_entry.get().strip()
@@ -1344,6 +1971,15 @@ class MergerApp:
             messagebox.showerror("Chyba složky", "Zadejte platnou cílovou složku pro uložení.")
             return
 
+        # Sync filename entries back to data
+        for idx, row in enumerate(self.split_section_rows):
+            if idx < len(self.split_detected_sections):
+                fn = row['filename_entry'].get().strip()
+                if fn:
+                    if not fn.lower().endswith('.pdf'):
+                        fn += '.pdf'
+                    self.split_detected_sections[idx]['filename'] = fn
+
         selected_secs = [s for s in self.split_detected_sections if s.get('export', True)]
 
         if not self.split_export_cover_var.get():
@@ -1353,23 +1989,27 @@ class MergerApp:
             messagebox.showwarning("Žádné sekce", "Nebyly vybrány žádné části dokumentace ke stažení/exportu.")
             return
 
-        self.btn_run_split.config(state='disabled')
-        self.btn_analyze.config(state='disabled')
-        self.split_status_lbl.config(text="Rozdělování spuštěno...")
+        self.btn_run_split.configure(state='disabled')
+        self.btn_analyze.configure(state='disabled')
+        self.split_status_lbl.configure(text="Rozdělování spuštěno...")
+        self.split_progress_bar.set(0)
         self._split_log(f"Spouštím rozdělení PDF. Cílová složka: {dst_dir}")
 
         def _worker():
             try:
-                import fitz
+                import fitz as fitz_split
                 os.makedirs(dst_dir, exist_ok=True)
-                doc_src = fitz.open(src_path)
+                doc_src = fitz_split.open(src_path)
                 total = len(selected_secs)
 
                 for idx, sec in enumerate(selected_secs):
-                    self._split_log(f"Exportuji ({idx+1}/{total}): {sec['filename']} (strany {sec['start_page']}–{sec['end_page']})...")
-                    self.root.after(0, lambda i=idx, t=total: self.split_status_lbl.config(text=f"Exportuji ({i+1}/{t})..."))
+                    pct = (idx + 1) / total
+                    msg_log = f"Exportuji ({idx+1}/{total}): {sec['filename']} (strany {sec['start_page']}–{sec['end_page']})..."
+                    msg_lbl = f"{int(pct * 100)}% - Exportuji ({idx+1}/{total}): {sec['filename']}..."
+                    self._split_log(msg_log)
+                    self.after(0, lambda m=msg_lbl, p=pct: self._update_split_progress(m, p))
 
-                    doc_sub = fitz.open()
+                    doc_sub = fitz_split.open()
                     doc_sub.insert_pdf(doc_src, from_page=sec['start_page']-1, to_page=sec['end_page']-1)
                     out_path = os.path.join(dst_dir, sec['filename'])
                     doc_sub.save(out_path)
@@ -1378,21 +2018,27 @@ class MergerApp:
 
                 doc_src.close()
                 self._split_log("🎉 Rozdělení dokumentace bylo úspěšně dokončeno.")
-                self.root.after(0, lambda: self._finish_split_execution(True, "Rozdělení bylo dokončeno!"))
+                self.after(0, lambda: self._finish_split_execution(True, "Rozdělení bylo dokončeno!"))
             except Exception as e:
-                self.root.after(0, lambda err=str(e): self._finish_split_execution(False, f"Chyba: {err}"))
+                self.after(0, lambda err=str(e): self._finish_split_execution(False, f"Chyba: {err}"))
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
 
+    def _update_split_progress(self, msg, pct):
+        self.split_status_lbl.configure(text=msg)
+        self.split_progress_bar.set(pct)
+
     def _finish_split_execution(self, success, msg):
-        self.btn_run_split.config(state='normal')
-        self.btn_analyze.config(state='normal')
+        self.btn_run_split.configure(state='normal')
+        self.btn_analyze.configure(state='normal')
         if success:
-            self.split_status_lbl.config(text="Rozdělení PDF dokončeno.")
+            self.split_progress_bar.set(1.0)
+            self.split_status_lbl.configure(text="Rozdělení PDF dokončeno.")
             messagebox.showinfo("Úspěch", f"Rozdělení PDF dokumentu bylo úspěšně dokončeno!\n\nVygenerované soubory naleznete ve složce:\n{self.split_dst_entry.get().strip()}")
         else:
-            self.split_status_lbl.config(text="Chyba při rozdělování.")
+            self.split_progress_bar.set(0.0)
+            self.split_status_lbl.configure(text="Chyba při rozdělování.")
             messagebox.showerror("Chyba", msg)
 
     def open_split_dst(self):
@@ -1405,94 +2051,15 @@ class MergerApp:
         else:
             messagebox.showerror("Chyba", f"Složka neexistuje:\n{dst_dir}")
 
-    def update_status(self, text):
-        self.status_label.config(text=text)
-        
-    def validate_inputs(self):
-        source_dir = self.source_entry.get().strip()
-        source_file = self.source_file_entry.get().strip()
-        target_dir = self.target_entry.get().strip()
-        
-        if source_file and not os.path.exists(source_file):
-            messagebox.showerror("Error", f"Source file does not exist:\n{source_file}")
-            return None, None, None
 
-        if not source_dir and source_file:
-            source_dir = os.path.dirname(os.path.abspath(source_file))
-            self.source_entry.delete(0, tk.END)
-            self.source_entry.insert(0, source_dir)
-
-        if not source_dir:
-            messagebox.showerror("Error", "Please select a source directory or source file.")
-            return None, None, None
-            
-        if not os.path.exists(source_dir):
-            messagebox.showerror("Error", f"Source directory does not exist:\n{source_dir}")
-            return None, None, None
-            
-        if target_dir and not os.path.exists(target_dir):
-            messagebox.showerror("Error", f"Target directory does not exist:\n{target_dir}")
-            return None, None, None
-            
-        return source_dir, source_file, target_dir
-
-    def process_complete(self, status):
-        self.run_button.config(state='normal')
-        self.preview_button.config(state='normal')
-        self.update_status(status)
-        messagebox.showinfo("Finished", f"Process completed: {status}")
-        
-    def preview_complete(self, status):
-        self.run_button.config(state='normal')
-        self.preview_button.config(state='normal')
-        self.update_status(status)
-
-    def start_preview(self):
-        source_dir, source_file, _ = self.validate_inputs()
-        if not source_dir:
-            return
-
-        self.run_button.config(state='disabled')
-        self.preview_button.config(state='disabled')
-        self.update_status("Generuji náhled...")
-        
-        self.log_text.configure(state='normal')
-        self.log_text.delete('1.0', tk.END)
-        self.log_text.configure(state='disabled')
-        
-        t = threading.Thread(
-            target=preview_process,
-            args=(source_dir, source_file if source_file else None, self.preview_complete)
-        )
-        t.daemon = True
-        t.start()
-
-    def start_process(self):
-        source_dir, source_file, target_dir = self.validate_inputs()
-        if not source_dir:
-            return
-
-        self.run_button.config(state='disabled')
-        self.preview_button.config(state='disabled')
-        self.update_status("Processing...")
-        
-        self.log_text.configure(state='normal')
-        self.log_text.delete('1.0', tk.END)
-        self.log_text.configure(state='disabled')
-        
-        CONVERSION_CACHE.clear()
-        
-        t = threading.Thread(
-            target=main_process,
-            args=(source_dir, target_dir if target_dir else None, source_file if source_file else None, self.process_complete)
-        )
-        t.daemon = True
-        t.start()
+# =========================================================================
+# ENTRY POINT
+# =========================================================================
 
 def main():
-    root = tk.Tk()
-    app = MergerApp(root)
-    root.mainloop()
+    app = MergerApp()
+    app.mainloop()
 
 if __name__ == "__main__":
     main()
+
